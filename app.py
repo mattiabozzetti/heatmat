@@ -458,14 +458,64 @@ def possession_adjust(raw: pd.Series, possession: pd.Series, adjustment: str, k:
     return raw
 
 
-def metric_series(df: pd.DataFrame, spec: dict[str, Any], mode: str) -> pd.Series:
+# Metriche che NON vanno mai corrette per possesso: sono output/qualità,
+# non semplici volumi di coinvolgimento. Questo evita di normalizzare xG, xA,
+# Goals, Assists, percentuali e conversioni.
+NO_POSSESSION_ADJUST_TOKENS = [
+    "%",
+    "accurate",
+    "accuracy",
+    "success",
+    "successful",
+    "won",
+    "conversion",
+    "xg",
+    "xa",
+    "goal",
+    "assist",
+    "shots on target",
+    "goals prevented",
+    "saved",
+    "cross claim rate",
+    "mistakes",
+    "lost balls",
+    "bad ball control",
+    "individual ball losses",
+]
+
+
+def effective_adjustment(spec: dict[str, Any], mode: str, section: str) -> str:
+    """Restituisce la correzione realmente applicata.
+
+    La modalità possession-adjusted corregge SOLO le metriche di Player Style
+    che sono volumi/opportunità. Le metriche di Performance e gli output
+    offensivi tipo xG/xA/goals/assists restano raw, come nella Player Card.
+    """
+    requested = spec.get("adjustment", "none")
+    if mode != "Possession-adjusted":
+        return "none"
+    if section.lower() != "style":
+        return "none"
+    if requested == "none":
+        return "none"
+
+    col = str(spec.get("column", "")).lower()
+    label = str(spec.get("label", "")).lower()
+    combined = f"{col} {label}"
+    if any(tok in combined for tok in NO_POSSESSION_ADJUST_TOKENS):
+        return "none"
+    return requested
+
+
+def metric_series(df: pd.DataFrame, spec: dict[str, Any], mode: str, section: str = "style") -> pd.Series:
     col = spec["column"]
     if col not in df.columns:
         return pd.Series(np.nan, index=df.index)
     raw = clean_numeric(df[col])
-    if mode == "Possession-adjusted":
+    adj = effective_adjustment(spec, mode, section)
+    if adj != "none":
         possession = clean_numeric(df.get("Ball possession, %", pd.Series(np.nan, index=df.index)))
-        return possession_adjust(raw, possession, spec.get("adjustment", "none"))
+        return possession_adjust(raw, possession, adj)
     return raw
 
 
@@ -479,7 +529,13 @@ def pct_rank(value: float, reference_values: pd.Series, reverse: bool = False) -
     return float(np.clip(pct, 0, 100))
 
 
-def compute_metric_values(player_row: pd.Series, reference_df: pd.DataFrame, specs: list[dict[str, Any]], mode: str) -> tuple[list[str], list[int], list[dict[str, Any]]]:
+def compute_metric_values(
+    player_row: pd.Series,
+    reference_df: pd.DataFrame,
+    specs: list[dict[str, Any]],
+    mode: str,
+    section: str,
+) -> tuple[list[str], list[int], list[dict[str, Any]]]:
     labels: list[str] = []
     values: list[int] = []
     records: list[dict[str, Any]] = []
@@ -498,8 +554,8 @@ def compute_metric_values(player_row: pd.Series, reference_df: pd.DataFrame, spe
             })
             continue
 
-        raw_value = metric_series(player_df, spec, mode).iloc[0]
-        ref_values = metric_series(reference_df, spec, mode)
+        raw_value = metric_series(player_df, spec, mode, section=section).iloc[0]
+        ref_values = metric_series(reference_df, spec, mode, section=section)
         percentile = pct_rank(raw_value, ref_values, reverse=spec.get("reverse", False))
 
         records.append({
@@ -509,7 +565,8 @@ def compute_metric_values(player_row: pd.Series, reference_df: pd.DataFrame, spe
             "Raw value": raw_value,
             "Percentile": percentile,
             "Reverse": bool(spec.get("reverse", False)),
-            "Adjustment": spec.get("adjustment", "none"),
+            "Requested adjustment": spec.get("adjustment", "none"),
+            "Applied adjustment": effective_adjustment(spec, mode, section),
             "Used": not pd.isna(percentile),
         })
 
@@ -644,19 +701,19 @@ def make_dual_pizza_figure(
     fig.text(0.25, 0.81, "Player Style", ha="center", va="center", fontsize=26, fontweight="bold")
     fig.text(0.75, 0.81, "Performance", ha="center", va="center", fontsize=26, fontweight="bold")
 
-    # Legenda identica come logica al template caricato, ma con quattro famiglie.
-    fig.text(0.40, 0.765, "Attack", fontsize=16, ha="right")
-    fig.text(0.405, 0.765, "■", fontsize=20, color=BLUE, ha="left")
-    fig.text(0.52, 0.765, "Possession", fontsize=16, ha="right")
-    fig.text(0.525, 0.765, "■", fontsize=20, color=YELLOW, ha="left")
-    fig.text(0.64, 0.765, "Passing", fontsize=16, ha="right")
-    fig.text(0.645, 0.765, "■", fontsize=20, color=GREEN, ha="left")
-    fig.text(0.76, 0.765, "Defense", fontsize=16, ha="right")
-    fig.text(0.765, 0.765, "■", fontsize=20, color=RED, ha="left")
+    # Legenda compatta centrata, nello stile del template originale.
+    fig.text(0.44, 0.785, "Passing", fontsize=16, ha="right")
+    fig.text(0.445, 0.785, "■", fontsize=20, color=GREEN, ha="left")
+    fig.text(0.56, 0.785, "Possession", fontsize=16, ha="right")
+    fig.text(0.565, 0.785, "■", fontsize=20, color=YELLOW, ha="left")
+    fig.text(0.44, 0.755, "Attack", fontsize=16, ha="right")
+    fig.text(0.445, 0.755, "■", fontsize=20, color=BLUE, ha="left")
+    fig.text(0.56, 0.755, "Defense", fontsize=16, ha="right")
+    fig.text(0.565, 0.755, "■", fontsize=20, color=RED, ha="left")
 
     fig.text(
         0.02, 0.03,
-        f"Percentile rank vs. {cohort_txt} | p90 values already normalized in source file | inverted metrics: lower is better",
+        f"Percentile rank vs. {cohort_txt} | possession-adjusted only on Player Style volume metrics | inverted metrics: lower is better",
         ha="left", va="bottom", fontsize=11,
     )
 
@@ -779,8 +836,8 @@ player_league = player_row.get("League", None)
 reference_df = build_reference(df, role, season, player_league, reference_scope, custom_leagues, min_minutes)
 
 template = ROLE_TEMPLATES[role]
-style_params, style_values, style_records = compute_metric_values(player_row, reference_df, template["style"], mode)
-perf_params, perf_values, perf_records = compute_metric_values(player_row, reference_df, template["performance"], mode)
+style_params, style_values, style_records = compute_metric_values(player_row, reference_df, template["style"], mode, section="style")
+perf_params, perf_values, perf_records = compute_metric_values(player_row, reference_df, template["performance"], mode, section="performance")
 style_colors = colors_for(template["style"], style_records)
 perf_colors = colors_for(template["performance"], perf_records)
 
@@ -832,7 +889,8 @@ for section, records in [("Player Style", style_records), ("Performance", perf_r
                 "Raw value": rec.get("Raw value"),
                 "Percentile": rec.get("Percentile"),
                 "Reverse": rec.get("Reverse", False),
-                "Adjustment": rec.get("Adjustment", "none"),
+                "Requested adjustment": rec.get("Requested adjustment", "none"),
+                "Applied adjustment": rec.get("Applied adjustment", "none"),
             })
 
 metric_df = pd.DataFrame(metric_rows)
