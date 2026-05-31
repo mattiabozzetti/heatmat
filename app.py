@@ -1,27 +1,48 @@
 from __future__ import annotations
 
-import math
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
+import matplotlib.pyplot as plt
+
+try:
+    from mplsoccer import PyPizza
+except ImportError as exc:  # pragma: no cover
+    st.error("Manca mplsoccer. Installa le dipendenze con: pip install -r requirements.txt")
+    raise exc
 
 # ============================================================
-# CONFIG BASE
+# APP CONFIG
 # ============================================================
 
-st.set_page_config(page_title="Dual Role Radar", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Dual Role Pizza Radar", page_icon="📊", layout="wide")
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "processed"
 PLAYERS_FILE = DATA_DIR / "players_enriched_with_clusters.csv.gz"
 GK_FILE = DATA_DIR / "gk_enriched_with_clusters.csv.gz"
 
-AXIS_ORDER = ["Offensive", "Defensive", "Possession", "Passing"]
 BIG_FIVE_LEAGUES = {"Serie A", "Premier League", "La Liga", "Bundesliga", "Ligue 1"}
+
+# Stile grafico coerente con il template caricato.
+FIG_BG = "#FFFFFF"   # richiesto: background grafico white
+LINE_BLACK = "#000000"
+CIRCLE_GREY = "#A6A6A6"
+GREEN = "#3CB37C"   # passing / creation
+YELLOW = "#F2D529"  # possession / carrying
+BLUE = "#2A86B1"    # attack / scoring
+RED = "#EF5A5A"     # defense / duel / inverse security
+
+FAMILY_COLORS = {
+    "attack": BLUE,
+    "possession": YELLOW,
+    "passing": GREEN,
+    "defense": RED,
+}
 
 ROLE_TO_BUCKET = {
     "CB": "CB",
@@ -33,45 +54,355 @@ ROLE_TO_BUCKET = {
 }
 
 ROLE_HELP = {
-    "CB": "Centre-backs: CB, LCB, RCB",
-    "FB/WB": "Full-backs / wing-backs: LB, RB, LWB/RWB logic via FB role bucket",
-    "MF": "Central / defensive midfielders",
-    "AM": "Attacking midfielders",
-    "W/RML": "Wide players: LW, RW, LM, RM, LAM, RAM",
-    "FW": "Forwards / strikers",
-    "GK": "Goalkeepers",
+    "CB": "Difensori centrali: CB, LCB, RCB",
+    "FB/WB": "Terzini/quinti: LB, RB e role bucket FB",
+    "MF": "Centrocampisti centrali / mediani",
+    "AM": "Trequartisti / attacking midfielders",
+    "W/RML": "Esterni: LW, RW, LM, RM, LAM, RAM",
+    "FW": "Attaccanti / prime punte",
+    "GK": "Portieri",
 }
 
 # ============================================================
-# METRIC HELPERS
+# METRICHE
 # ============================================================
 
-def m(column: str, higher_is_better: bool = True, adjustment: str | None = None) -> dict[str, Any]:
-    """Metric shorthand.
+def metric(label: str, column: str, family: str, reverse: bool = False, adjustment: str | None = None) -> dict[str, Any]:
+    """Definisce una singola metrica del pizza/radar.
 
-    adjustment:
-    - none: no possession adjustment
-    - on_ball: volume boosted downward for high-possession teams, upward for low-possession teams
-    - off_ball: defensive/off-ball volume boosted upward for high-possession teams, downward for low-possession teams
+    family: attack, possession, passing, defense.
+    reverse=True quando valori più bassi sono migliori.
+    adjustment: none, on_ball, off_ball. Se None viene inferito.
     """
     if adjustment is None:
-        adjustment = infer_adjustment(column, higher_is_better)
-    return {"column": column, "higher_is_better": higher_is_better, "adjustment": adjustment}
+        adjustment = infer_adjustment(column, reverse)
+    return {
+        "label": label,
+        "column": column,
+        "family": family,
+        "reverse": reverse,
+        "adjustment": adjustment,
+    }
 
 
-def infer_adjustment(column: str, higher_is_better: bool) -> str:
+def infer_adjustment(column: str, reverse: bool = False) -> str:
     lower = column.lower()
-    quality_tokens = [", %", "%", "xgc", "xgps", "xg per", "goals prevented, %", "cross claim rate"]
+    quality_tokens = [", %", "%", "xgc", "xgps", "xg per", "goals prevented", "cross claim rate"]
     off_ball_tokens = [
         "defensive", "tackle", "interception", "recover", "air challenge", "challenge",
-        "shots faced", "shots on target faced", "opponent", "cross and pass interception", "sweeping"
+        "shots faced", "shots on target faced", "opponent", "cross and pass interception", "sweeping",
     ]
     if any(tok in lower for tok in quality_tokens):
         return "none"
     if any(tok in lower for tok in off_ball_tokens):
         return "off_ball"
+    if reverse:
+        return "none"
     return "on_ball"
 
+
+m = metric
+
+# ============================================================
+# ROLE-SPECIFIC TEMPLATES
+# Ordine identico al template caricato: ATTACK -> POSSESSION -> PASSING -> DEFENSE
+# Ogni ruolo mantiene la stessa struttura visuale ma cambia metriche.
+# ============================================================
+
+ROLE_TEMPLATES: dict[str, dict[str, Any]] = {
+    "FW": {
+        "display": "Forward / Striker",
+        "description": "Box threat, hold-up, link play and pressing/duels.",
+        "style": [
+            # ATTACK
+            m("Shots p90", "Shots", "attack"),
+            m("xG p90", "xG (expected goals)", "attack"),
+            m("Box shots\np90", "Shots from the penalty area", "attack"),
+            m("Box actions\np90", "Actions in opponent's box", "attack"),
+            # POSSESSION
+            m("Open passes\nreceived p90", "Open passes received", "possession"),
+            m("Final 3rd\nreceiving p90", "Open passes received in the final third", "possession"),
+            m("Box\nreceptions p90", "Open passes received in the opponent's box", "possession"),
+            m("Attacking\nduels p90", "Attacking challenges", "possession"),
+            # PASSING
+            m("Passes p90", "Passes", "passing"),
+            m("Key passes\np90", "Key passes", "passing"),
+            m("Passes for\nshot p90", "Passes for a shot", "passing"),
+            m("xA p90", "xA", "passing"),
+            # DEFENSE
+            m("Def. duels\np90", "Defensive challenges", "defense", adjustment="off_ball"),
+            m("Opp. half\nrecoveries p90", "Ball recoveries in opponent's half", "defense", adjustment="off_ball"),
+            m("Aerial duels\np90", "Air challenges", "defense", adjustment="off_ball"),
+            m("Tackles p90", "Tackles", "defense", adjustment="off_ball"),
+        ],
+        "performance": [
+            # ATTACK
+            m("Goals p90", "Goals", "attack"),
+            m("Shots on\ntarget %", "Shots on target, %", "attack", adjustment="none"),
+            m("xG per\nshot", "xGPS (xG per shot)", "attack", adjustment="none"),
+            m("xG\nconversion", "xGC (xG conversion)", "attack", adjustment="none"),
+            # POSSESSION
+            m("Actions\nsuccess %", "Actions successful, %", "possession", adjustment="none"),
+            m("Dribble\nsuccess %", "Dribbles successful, %", "possession", adjustment="none"),
+            m("Attacking\nduel win %", "Attacking challenges won, %", "possession", adjustment="none"),
+            m("Lost balls\ninverted", "Lost balls", "possession", reverse=True),
+            # PASSING
+            m("Passes\naccuracy %", "Passes accurate, %", "passing", adjustment="none"),
+            m("Key pass\naccuracy %", "Key passes accurate, %", "passing", adjustment="none"),
+            m("Assists p90", "Assists", "passing"),
+            m("xA p90", "xA", "passing"),
+            # DEFENSE
+            m("Def. duel\nwin %", "Defensive challenges won, %", "defense", adjustment="none"),
+            m("Aerial\nwin %", "Air challenges won, %", "defense", adjustment="none"),
+            m("Tackle\nsuccess %", "Tackles successful, %", "defense", adjustment="none"),
+            m("Challenges\nwon %", "Challenges won, %", "defense", adjustment="none"),
+        ],
+    },
+    "W/RML": {
+        "display": "Winger / Wide Midfielder",
+        "description": "Wide-to-box threat, 1v1, delivery and wide work rate.",
+        "style": [
+            m("Shots p90", "Shots", "attack"),
+            m("xG p90", "xG (expected goals)", "attack"),
+            m("Box shots\np90", "Shots from the penalty area", "attack"),
+            m("Box actions\np90", "Actions in opponent's box", "attack"),
+            m("Dribbles p90", "Dribbles", "possession"),
+            m("Final 3rd\ndribbles p90", "Dribbling in the final third", "possession"),
+            m("Carries p90", "Carry", "possession"),
+            m("Final 3rd\ncarries p90", "Final third entries through carry", "possession"),
+            m("Crosses p90", "Crosses", "passing"),
+            m("Key passes\np90", "Key passes", "passing"),
+            m("Box passes\np90", "Passes into the penalty box", "passing"),
+            m("Passes for\nshot p90", "Passes for a shot", "passing"),
+            m("Def. duels\np90", "Defensive challenges", "defense", adjustment="off_ball"),
+            m("Tackles p90", "Tackles", "defense", adjustment="off_ball"),
+            m("Recoveries p90", "Ball recoveries", "defense", adjustment="off_ball"),
+            m("Opp. half\nrecoveries p90", "Ball recoveries in opponent's half", "defense", adjustment="off_ball"),
+        ],
+        "performance": [
+            m("Goals+Assists\np90", "Goals + Assists", "attack"),
+            m("Shots on\ntarget %", "Shots on target, %", "attack", adjustment="none"),
+            m("xG per\nshot", "xGPS (xG per shot)", "attack", adjustment="none"),
+            m("xG\nconversion", "xGC (xG conversion)", "attack", adjustment="none"),
+            m("Dribble\nsuccess %", "Dribbles successful, %", "possession", adjustment="none"),
+            m("Final 3rd\ndribble success %", "Dribbling in the final third successful, %", "possession", adjustment="none"),
+            m("Actions\nsuccess %", "Actions successful, %", "possession", adjustment="none"),
+            m("Lost balls\ninverted", "Lost balls", "possession", reverse=True),
+            m("Cross\naccuracy %", "Crosses accurate, %", "passing", adjustment="none"),
+            m("Key pass\naccuracy %", "Key passes accurate, %", "passing", adjustment="none"),
+            m("Box pass\naccuracy %", "Passes into the penalty box accurate, %", "passing", adjustment="none"),
+            m("Progressive pass\naccuracy %", "Progressive passes accurate, %", "passing", adjustment="none"),
+            m("Def. duel\nwin %", "Defensive challenges won, %", "defense", adjustment="none"),
+            m("Tackle\nsuccess %", "Tackles successful, %", "defense", adjustment="none"),
+            m("Challenges\nwon %", "Challenges won, %", "defense", adjustment="none"),
+            m("Mistakes\ninverted", "Mistakes leading to chances", "defense", reverse=True, adjustment="none"),
+        ],
+    },
+    "AM": {
+        "display": "Attacking Midfielder",
+        "description": "Final-third damage, between-lines receiving, creative passing and counterpressing.",
+        "style": [
+            m("Shots p90", "Shots", "attack"),
+            m("xG p90", "xG (expected goals)", "attack"),
+            m("xA p90", "xA", "attack"),
+            m("Box actions\np90", "Actions in opponent's box", "attack"),
+            m("Final 3rd\nreceiving p90", "Open passes received in the final third", "possession"),
+            m("Box\nreceptions p90", "Open passes received in the opponent's box", "possession"),
+            m("Dribbles p90", "Dribbles", "possession"),
+            m("Carries p90", "Carry", "possession"),
+            m("Key passes\np90", "Key passes", "passing"),
+            m("Passes for\nshot p90", "Passes for a shot", "passing"),
+            m("Progressive\npasses p90", "Progressive passes", "passing"),
+            m("Box passes\np90", "Passes into the penalty box", "passing"),
+            m("Def. duels\np90", "Defensive challenges", "defense", adjustment="off_ball"),
+            m("Tackles p90", "Tackles", "defense", adjustment="off_ball"),
+            m("Opp. half\nrecoveries p90", "Ball recoveries in opponent's half", "defense", adjustment="off_ball"),
+            m("Interceptions\np90", "Interceptions", "defense", adjustment="off_ball"),
+        ],
+        "performance": [
+            m("Goals+Assists\np90", "Goals + Assists", "attack"),
+            m("xG\nconversion", "xGC (xG conversion)", "attack", adjustment="none"),
+            m("xG per\nshot", "xGPS (xG per shot)", "attack", adjustment="none"),
+            m("Chances\nsuccess %", "Chances successful, %", "attack", adjustment="none"),
+            m("Dribble\nsuccess %", "Dribbles successful, %", "possession", adjustment="none"),
+            m("Final 3rd\ndribble success %", "Dribbling in the final third successful, %", "possession", adjustment="none"),
+            m("Actions\nsuccess %", "Actions successful, %", "possession", adjustment="none"),
+            m("Lost balls\ninverted", "Lost balls", "possession", reverse=True),
+            m("Key pass\naccuracy %", "Key passes accurate, %", "passing", adjustment="none"),
+            m("Progressive pass\naccuracy %", "Progressive passes accurate, %", "passing", adjustment="none"),
+            m("Box pass\naccuracy %", "Passes into the penalty box accurate, %", "passing", adjustment="none"),
+            m("Passes\naccuracy %", "Passes accurate, %", "passing", adjustment="none"),
+            m("Def. duel\nwin %", "Defensive challenges won, %", "defense", adjustment="none"),
+            m("Tackle\nsuccess %", "Tackles successful, %", "defense", adjustment="none"),
+            m("Challenges\nwon %", "Challenges won, %", "defense", adjustment="none"),
+            m("Mistakes\ninverted", "Mistakes leading to chances", "defense", reverse=True, adjustment="none"),
+        ],
+    },
+    "MF": {
+        "display": "Midfielder",
+        "description": "Tempo, progression, availability and ball winning.",
+        "style": [
+            m("Key passes\np90", "Key passes", "attack"),
+            m("Passes for\nshot p90", "Passes for a shot", "attack"),
+            m("Chances\ncreated p90", "Chances created", "attack"),
+            m("xA p90", "xA", "attack"),
+            m("Open passes\nreceived p90", "Open passes received", "possession"),
+            m("Central 3rd\nreceiving p90", "Open passes received in the central third", "possession"),
+            m("Carries p90", "Carry", "possession"),
+            m("Actions p90", "Actions", "possession"),
+            m("Passes p90", "Passes", "passing"),
+            m("Short passes\np90", "Short passes", "passing"),
+            m("Progressive\npasses p90", "Progressive passes", "passing"),
+            m("Long passes\np90", "Long passes", "passing"),
+            m("Def. duels\np90", "Defensive challenges", "defense", adjustment="off_ball"),
+            m("Tackles p90", "Tackles", "defense", adjustment="off_ball"),
+            m("Interceptions\np90", "Interceptions", "defense", adjustment="off_ball"),
+            m("Recoveries p90", "Ball recoveries", "defense", adjustment="off_ball"),
+        ],
+        "performance": [
+            m("Key pass\naccuracy %", "Key passes accurate, %", "attack", adjustment="none"),
+            m("Chances\nsuccess %", "Chances successful, %", "attack", adjustment="none"),
+            m("xA p90", "xA", "attack"),
+            m("Goals+Assists\np90", "Goals + Assists", "attack"),
+            m("Actions\nsuccess %", "Actions successful, %", "possession", adjustment="none"),
+            m("Lost balls\ninverted", "Lost balls", "possession", reverse=True),
+            m("Individual losses\ninverted", "Individual ball losses", "possession", reverse=True),
+            m("Bad control\ninverted", "Bad ball control", "possession", reverse=True),
+            m("Passes\naccuracy %", "Passes accurate, %", "passing", adjustment="none"),
+            m("Short pass\naccuracy %", "Short passes accurate, %", "passing", adjustment="none"),
+            m("Progressive pass\naccuracy %", "Progressive passes accurate, %", "passing", adjustment="none"),
+            m("Long pass\naccuracy %", "Long passes accurate, %", "passing", adjustment="none"),
+            m("Def. duel\nwin %", "Defensive challenges won, %", "defense", adjustment="none"),
+            m("Tackle\nsuccess %", "Tackles successful, %", "defense", adjustment="none"),
+            m("Challenges\nwon %", "Challenges won, %", "defense", adjustment="none"),
+            m("Mistakes\ninverted", "Mistakes leading to chances", "defense", reverse=True, adjustment="none"),
+        ],
+    },
+    "FB/WB": {
+        "display": "Full-back / Wing-back",
+        "description": "Wide delivery, progression, carrying and 1v1 defending.",
+        "style": [
+            m("Crosses p90", "Crosses", "attack"),
+            m("Box passes\np90", "Passes into the penalty box", "attack"),
+            m("Final 3rd\nentries p90", "Final third entries", "attack"),
+            m("Box actions\np90", "Actions in opponent's box", "attack"),
+            m("Carries p90", "Carry", "possession"),
+            m("Final 3rd\ncarries p90", "Final third entries through carry", "possession"),
+            m("Dribbles p90", "Dribbles", "possession"),
+            m("Final 3rd\nreceiving p90", "Open passes received in the final third", "possession"),
+            m("Progressive\npasses p90", "Progressive passes", "passing"),
+            m("Final 3rd\npasses p90", "Passes forward to the final third", "passing"),
+            m("Key passes\np90", "Key passes", "passing"),
+            m("Passes for\nshot p90", "Passes for a shot", "passing"),
+            m("Def. duels\np90", "Defensive challenges", "defense", adjustment="off_ball"),
+            m("Tackles p90", "Tackles", "defense", adjustment="off_ball"),
+            m("Interceptions\np90", "Interceptions", "defense", adjustment="off_ball"),
+            m("Recoveries p90", "Ball recoveries", "defense", adjustment="off_ball"),
+        ],
+        "performance": [
+            m("Cross\naccuracy %", "Crosses accurate, %", "attack", adjustment="none"),
+            m("Box pass\naccuracy %", "Passes into the penalty box accurate, %", "attack", adjustment="none"),
+            m("xA p90", "xA", "attack"),
+            m("Box action\nsuccess %", "Actions in opponent's box successful, %", "attack", adjustment="none"),
+            m("Dribble\nsuccess %", "Dribbles successful, %", "possession", adjustment="none"),
+            m("Actions\nsuccess %", "Actions successful, %", "possession", adjustment="none"),
+            m("Lost balls\ninverted", "Lost balls", "possession", reverse=True),
+            m("Bad control\ninverted", "Bad ball control", "possession", reverse=True),
+            m("Progressive pass\naccuracy %", "Progressive passes accurate, %", "passing", adjustment="none"),
+            m("Final 3rd pass\naccuracy %", "Passes forward to the final third accurate, %", "passing", adjustment="none"),
+            m("Key pass\naccuracy %", "Key passes accurate, %", "passing", adjustment="none"),
+            m("Passes\naccuracy %", "Passes accurate, %", "passing", adjustment="none"),
+            m("Def. duel\nwin %", "Defensive challenges won, %", "defense", adjustment="none"),
+            m("Tackle\nsuccess %", "Tackles successful, %", "defense", adjustment="none"),
+            m("Challenges\nwon %", "Challenges won, %", "defense", adjustment="none"),
+            m("Mistakes\ninverted", "Mistakes leading to chances", "defense", reverse=True, adjustment="none"),
+        ],
+    },
+    "CB": {
+        "display": "Centre-back",
+        "description": "Stopping, aerial command, build-up range and security.",
+        "style": [
+            m("Box actions\np90", "Actions in opponent's box", "attack"),
+            m("Headers p90", "Headers", "attack"),
+            m("Head goals\np90", "Goals by head", "attack"),
+            m("xG p90", "xG (expected goals)", "attack"),
+            m("Actions p90", "Actions", "possession"),
+            m("Carries p90", "Carry", "possession"),
+            m("Open passes\nreceived p90", "Open passes received", "possession"),
+            m("Final 3rd\ncarries p90", "Final third entries through carry", "possession"),
+            m("Passes p90", "Passes", "passing"),
+            m("Long passes\np90", "Long passes", "passing"),
+            m("Progressive\npasses p90", "Progressive passes", "passing"),
+            m("Final 3rd\npasses p90", "Passes forward to the final third", "passing"),
+            m("Def. duels\np90", "Defensive challenges", "defense", adjustment="off_ball"),
+            m("Tackles p90", "Tackles", "defense", adjustment="off_ball"),
+            m("Interceptions\np90", "Interceptions", "defense", adjustment="off_ball"),
+            m("Aerial duels\np90", "Air challenges", "defense", adjustment="off_ball"),
+        ],
+        "performance": [
+            m("Header target %", "Headers on target, %", "attack", adjustment="none"),
+            m("Goals p90", "Goals", "attack"),
+            m("xG per\nshot", "xGPS (xG per shot)", "attack", adjustment="none"),
+            m("xG\nconversion", "xGC (xG conversion)", "attack", adjustment="none"),
+            m("Actions\nsuccess %", "Actions successful, %", "possession", adjustment="none"),
+            m("Bad control\ninverted", "Bad ball control", "possession", reverse=True),
+            m("Individual losses\ninverted", "Individual ball losses", "possession", reverse=True),
+            m("Lost balls\ninverted", "Lost balls", "possession", reverse=True),
+            m("Passes\naccuracy %", "Passes accurate, %", "passing", adjustment="none"),
+            m("Long pass\naccuracy %", "Long passes accurate, %", "passing", adjustment="none"),
+            m("Progressive pass\naccuracy %", "Progressive passes accurate, %", "passing", adjustment="none"),
+            m("Final 3rd pass\naccuracy %", "Passes forward to the final third accurate, %", "passing", adjustment="none"),
+            m("Def. duel\nwin %", "Defensive challenges won, %", "defense", adjustment="none"),
+            m("Tackle\nsuccess %", "Tackles successful, %", "defense", adjustment="none"),
+            m("Aerial\nwin %", "Air challenges won, %", "defense", adjustment="none"),
+            m("Mistakes\ninverted", "Mistakes leading to chances", "defense", reverse=True, adjustment="none"),
+        ],
+    },
+    "GK": {
+        "display": "Goalkeeper",
+        "description": "Shot stopping, box command, build-up distribution and launch profile.",
+        "style": [
+            m("Progressive\nopen passes", "Progressive open passes", "attack"),
+            m("Long passes", "Long passes", "attack"),
+            m("Long goal\nkicks", "Goal kicks long (40+ m)", "attack"),
+            m("Throws", "Throws", "attack"),
+            m("Actions", "Actions", "possession"),
+            m("Open play\npasses", "Open play passes", "possession"),
+            m("Sweeping\nactions", "Sweeping actions", "possession", adjustment="off_ball"),
+            m("Set-piece\npasses", "Passes from set pieces", "possession"),
+            m("Passes", "Passes", "passing"),
+            m("Short passes", "Short passes", "passing"),
+            m("Medium passes", "Medium passes", "passing"),
+            m("Long passes", "Long passes", "passing"),
+            m("Shots on target\nfaced", "Shots on target faced", "defense", adjustment="off_ball"),
+            m("Opp. shots\nxG", "Opponent's shots xG", "defense", adjustment="off_ball"),
+            m("Opp. crosses", "Opponent's crosses", "defense", adjustment="off_ball"),
+            m("Cross/pass\ninterceptions", "Cross and pass interception attempts", "defense", adjustment="off_ball"),
+        ],
+        "performance": [
+            m("Long pass\naccuracy %", "Long passes accurate, %", "attack", adjustment="none"),
+            m("Long goal kick\naccuracy %", "Goal kicks long (40+ m) accurate, %", "attack", adjustment="none"),
+            m("Throws\naccuracy %", "Throws accurate, %", "attack", adjustment="none"),
+            m("Set-piece pass\naccuracy %", "Set-piece passes accurate, %", "attack", adjustment="none"),
+            m("Actions\nsuccess %", "Actions successful, %", "possession", adjustment="none"),
+            m("Open play pass\naccuracy %", "Open play passes accurate, %", "possession", adjustment="none"),
+            m("Sweeping\nsuccess %", "Sweeping actions successful, %", "possession", adjustment="none"),
+            m("Mistakes\ninverted", "Mistakes leading to chances", "possession", reverse=True, adjustment="none"),
+            m("Passes\naccuracy %", "Passes accurate, %", "passing", adjustment="none"),
+            m("Short pass\naccuracy %", "Short passes accurate, %", "passing", adjustment="none"),
+            m("Medium pass\naccuracy %", "Medium passes accurate, %", "passing", adjustment="none"),
+            m("Long pass\naccuracy %", "Long passes accurate, %", "passing", adjustment="none"),
+            m("Goals\nprevented", "Goals prevented", "defense", adjustment="none"),
+            m("Goals\nprevented %", "Goals prevented, %", "defense", adjustment="none"),
+            m("Shots\nsaved %", "Shots saved, %", "defense", adjustment="none"),
+            m("Cross claim\nrate", "Cross claim rate", "defense", adjustment="none"),
+        ],
+    },
+}
+
+# ============================================================
+# DATA
+# ============================================================
 
 def clean_numeric(series: pd.Series) -> pd.Series:
     if pd.api.types.is_numeric_dtype(series):
@@ -86,259 +417,15 @@ def clean_numeric(series: pd.Series) -> pd.Series:
     )
 
 
-def possession_adjust(raw: pd.Series, possession: pd.Series, adjustment: str, k: float = 8.0, gamma: float = 0.35) -> pd.Series:
-    raw = pd.to_numeric(raw, errors="coerce")
-    if adjustment == "none":
-        return raw
-    possession = pd.to_numeric(possession, errors="coerce")
-    # Team possession is stored as 0-1 in the processed files.
-    s = 2 / (1 + np.exp(-k * (possession - 0.50))) - 1
-    if adjustment == "on_ball":
-        return raw * (1 - gamma * s)
-    if adjustment == "off_ball":
-        return raw * (1 + gamma * s)
-    return raw
-
-
-def metric_series(df: pd.DataFrame, metric: dict[str, Any], mode: str) -> pd.Series:
-    col = metric["column"]
-    if col not in df.columns:
-        return pd.Series(np.nan, index=df.index)
-    raw = clean_numeric(df[col])
-    if mode == "Possession-adjusted":
-        possession = clean_numeric(df.get("Ball possession, %", pd.Series(np.nan, index=df.index)))
-        return possession_adjust(raw, possession, metric.get("adjustment", "none"))
-    return raw
-
-
-def percentile_rank(value: float, reference_values: pd.Series, higher_is_better: bool = True) -> float:
-    values = pd.to_numeric(reference_values, errors="coerce").dropna()
-    if pd.isna(value) or len(values) < 3:
-        return float("nan")
-    pct = 100 * ((values < value).sum() + 0.5 * (values == value).sum()) / len(values)
-    if not higher_is_better:
-        pct = 100 - pct
-    return float(np.clip(pct, 0, 100))
-
-
-def axis_score(player_row: pd.Series, reference_df: pd.DataFrame, metrics: list[dict[str, Any]], mode: str) -> tuple[float, list[dict[str, Any]]]:
-    details: list[dict[str, Any]] = []
-    pcts: list[float] = []
-    player_df = player_row.to_frame().T
-
-    for metric in metrics:
-        col = metric["column"]
-        if col not in reference_df.columns or col not in player_row.index:
-            details.append({"metric": col, "raw": np.nan, "percentile": np.nan, "used": False})
-            continue
-        raw_value = metric_series(player_df, metric, mode).iloc[0]
-        ref_values = metric_series(reference_df, metric, mode)
-        pct = percentile_rank(raw_value, ref_values, metric.get("higher_is_better", True))
-        details.append({"metric": col, "raw": raw_value, "percentile": pct, "used": not math.isnan(pct)})
-        if not math.isnan(pct):
-            pcts.append(pct)
-
-    return (float(np.mean(pcts)) if pcts else float("nan")), details
-
-
-def compute_radar_scores(player_row: pd.Series, reference_df: pd.DataFrame, template: dict[str, Any], mode: str) -> tuple[dict[str, float], dict[str, float], list[dict[str, Any]]]:
-    style_scores: dict[str, float] = {}
-    perf_scores: dict[str, float] = {}
-    rows: list[dict[str, Any]] = []
-
-    for axis in AXIS_ORDER:
-        style_score, style_details = axis_score(player_row, reference_df, template["style"][axis], mode)
-        perf_score, perf_details = axis_score(player_row, reference_df, template["performance"][axis], mode)
-
-        style_scores[axis] = style_score
-        perf_scores[axis] = perf_score
-
-        rows.append({
-            "Axis": axis,
-            "Tactical meaning": template["axis_labels"][axis],
-            "Style score": style_score,
-            "Performance score": perf_score,
-            "Style metrics used": ", ".join(d["metric"] for d in style_details if d["used"]),
-            "Performance metrics used": ", ".join(d["metric"] for d in perf_details if d["used"]),
-            "Missing style metrics": ", ".join(d["metric"] for d in style_details if not d["used"]),
-            "Missing performance metrics": ", ".join(d["metric"] for d in perf_details if not d["used"]),
-        })
-
-    return style_scores, perf_scores, rows
-
-
-def fmt_pct(value: float) -> str:
-    return "—" if pd.isna(value) or math.isnan(value) else f"{value:.0f}"
-
-
-def fmt_num(value: Any, digits: int = 0) -> str:
-    try:
-        if pd.isna(value):
-            return "—"
-        return f"{float(value):,.{digits}f}"
-    except Exception:
-        return "—"
-
-# ============================================================
-# ROLE-SPECIFIC TEMPLATES
-# ============================================================
-
-RADAR_TEMPLATES: dict[str, dict[str, Any]] = {
-    "CB": {
-        "axis_labels": {
-            "Offensive": "Set-piece / box threat",
-            "Defensive": "Stopping & aerial command",
-            "Possession": "Ball security under pressure",
-            "Passing": "Build-up range",
-        },
-        "style": {
-            "Offensive": [m("Actions in opponent's box"), m("Headers"), m("Goals by head"), m("xG (expected goals)")],
-            "Defensive": [m("Defensive challenges", adjustment="off_ball"), m("Tackles", adjustment="off_ball"), m("Interceptions", adjustment="off_ball"), m("Air challenges", adjustment="off_ball"), m("Ball recoveries", adjustment="off_ball")],
-            "Possession": [m("Actions"), m("Carry"), m("Open passes received"), m("Lost balls", False)],
-            "Passing": [m("Passes"), m("Long passes"), m("Progressive passes"), m("Passes forward to the final third")],
-        },
-        "performance": {
-            "Offensive": [m("Headers on target, %", adjustment="none"), m("Goals"), m("xGC (xG conversion)", adjustment="none"), m("Actions in opponent's box successful, %", adjustment="none")],
-            "Defensive": [m("Defensive challenges won, %", adjustment="none"), m("Tackles successful, %", adjustment="none"), m("Air challenges won, %", adjustment="none"), m("Mistakes leading to chances", False, "none")],
-            "Possession": [m("Actions successful, %", adjustment="none"), m("Bad ball control", False), m("Individual ball losses", False), m("Lost balls", False)],
-            "Passing": [m("Passes accurate, %", adjustment="none"), m("Long passes accurate, %", adjustment="none"), m("Progressive passes accurate, %", adjustment="none"), m("Passes forward to the final third accurate, %", adjustment="none")],
-        },
-    },
-    "FB/WB": {
-        "axis_labels": {
-            "Offensive": "Wide threat / box delivery",
-            "Defensive": "1v1 defending & recovery",
-            "Possession": "Carry & escape",
-            "Passing": "Progressive supply",
-        },
-        "style": {
-            "Offensive": [m("Crosses"), m("Passes into the penalty box"), m("Final third entries"), m("Actions in opponent's box"), m("xA")],
-            "Defensive": [m("Defensive challenges", adjustment="off_ball"), m("Tackles", adjustment="off_ball"), m("Interceptions", adjustment="off_ball"), m("Ball recoveries", adjustment="off_ball"), m("Air challenges", adjustment="off_ball")],
-            "Possession": [m("Carry"), m("Final third entries through carry"), m("Dribbles"), m("Open passes received in the final third")],
-            "Passing": [m("Progressive passes"), m("Passes forward to the final third"), m("Key passes"), m("Passes for a shot")],
-        },
-        "performance": {
-            "Offensive": [m("Crosses accurate, %", adjustment="none"), m("Passes into the penalty box accurate, %", adjustment="none"), m("Chances created"), m("xA")],
-            "Defensive": [m("Defensive challenges won, %", adjustment="none"), m("Tackles successful, %", adjustment="none"), m("Air challenges won, %", adjustment="none"), m("Mistakes leading to chances", False, "none")],
-            "Possession": [m("Dribbles successful, %", adjustment="none"), m("Actions successful, %", adjustment="none"), m("Lost balls", False), m("Bad ball control", False)],
-            "Passing": [m("Progressive passes accurate, %", adjustment="none"), m("Passes forward to the final third accurate, %", adjustment="none"), m("Key passes accurate, %", adjustment="none"), m("Passes accurate, %", adjustment="none")],
-        },
-    },
-    "MF": {
-        "axis_labels": {
-            "Offensive": "Chance support / final-third influence",
-            "Defensive": "Ball winning & coverage",
-            "Possession": "Availability & carrying",
-            "Passing": "Tempo & progression",
-        },
-        "style": {
-            "Offensive": [m("Key passes"), m("Passes for a shot"), m("Chances created"), m("xA"), m("Final third entries")],
-            "Defensive": [m("Defensive challenges", adjustment="off_ball"), m("Tackles", adjustment="off_ball"), m("Interceptions", adjustment="off_ball"), m("Ball recoveries", adjustment="off_ball"), m("Loose ball recoveries", adjustment="off_ball")],
-            "Possession": [m("Open passes received"), m("Open passes received in the central third"), m("Carry"), m("Final third entries through carry"), m("Actions")],
-            "Passing": [m("Passes"), m("Short passes"), m("Progressive passes"), m("Passes forward to the final third"), m("Long passes")],
-        },
-        "performance": {
-            "Offensive": [m("Key passes accurate, %", adjustment="none"), m("Chances successful, %", adjustment="none"), m("xA"), m("Goals + Assists")],
-            "Defensive": [m("Defensive challenges won, %", adjustment="none"), m("Tackles successful, %", adjustment="none"), m("Challenges won, %", adjustment="none"), m("Mistakes leading to chances", False, "none")],
-            "Possession": [m("Actions successful, %", adjustment="none"), m("Lost balls", False), m("Individual ball losses", False), m("Bad ball control", False)],
-            "Passing": [m("Passes accurate, %", adjustment="none"), m("Short passes accurate, %", adjustment="none"), m("Progressive passes accurate, %", adjustment="none"), m("Long passes accurate, %", adjustment="none")],
-        },
-    },
-    "AM": {
-        "axis_labels": {
-            "Offensive": "Final-third damage",
-            "Defensive": "Counterpressing / high recovery",
-            "Possession": "Between-lines receiving & 1v1",
-            "Passing": "Creative passing",
-        },
-        "style": {
-            "Offensive": [m("Goals"), m("xG (expected goals)"), m("xA"), m("Actions in opponent's box"), m("Chances created")],
-            "Defensive": [m("Defensive challenges", adjustment="off_ball"), m("Tackles", adjustment="off_ball"), m("Ball recoveries in opponent's half", adjustment="off_ball"), m("Interceptions", adjustment="off_ball")],
-            "Possession": [m("Open passes received in the final third"), m("Open passes received in the opponent's box"), m("Dribbles"), m("Dribbling in the final third"), m("Carry")],
-            "Passing": [m("Key passes"), m("Passes for a shot"), m("Progressive passes"), m("Passes into the penalty box"), m("Passes")],
-        },
-        "performance": {
-            "Offensive": [m("Goals + Assists"), m("xGC (xG conversion)", adjustment="none"), m("Chances successful, %", adjustment="none"), m("Actions in opponent's box successful, %", adjustment="none")],
-            "Defensive": [m("Defensive challenges won, %", adjustment="none"), m("Tackles successful, %", adjustment="none"), m("Challenges won, %", adjustment="none")],
-            "Possession": [m("Dribbles successful, %", adjustment="none"), m("Dribbling in the final third successful, %", adjustment="none"), m("Actions successful, %", adjustment="none"), m("Lost balls", False)],
-            "Passing": [m("Key passes accurate, %", adjustment="none"), m("Progressive passes accurate, %", adjustment="none"), m("Passes into the penalty box accurate, %", adjustment="none"), m("Passes accurate, %", adjustment="none")],
-        },
-    },
-    "W/RML": {
-        "axis_labels": {
-            "Offensive": "Wide-to-box threat",
-            "Defensive": "Wide work rate",
-            "Possession": "1v1 / carrying threat",
-            "Passing": "Delivery & chance creation",
-        },
-        "style": {
-            "Offensive": [m("Shots"), m("xG (expected goals)"), m("Actions in opponent's box"), m("Open passes received in the opponent's box"), m("Shots from the penalty area")],
-            "Defensive": [m("Defensive challenges", adjustment="off_ball"), m("Tackles", adjustment="off_ball"), m("Ball recoveries", adjustment="off_ball"), m("Ball recoveries in opponent's half", adjustment="off_ball")],
-            "Possession": [m("Dribbles"), m("Dribbling in the final third"), m("Carry"), m("Final third entries through carry"), m("Open passes received in the final third")],
-            "Passing": [m("Crosses"), m("Key passes"), m("Passes into the penalty box"), m("Passes for a shot"), m("Progressive passes")],
-        },
-        "performance": {
-            "Offensive": [m("Goals + Assists"), m("Shots on target, %", adjustment="none"), m("xGPS (xG per shot)", adjustment="none"), m("xGC (xG conversion)", adjustment="none")],
-            "Defensive": [m("Defensive challenges won, %", adjustment="none"), m("Tackles successful, %", adjustment="none"), m("Challenges won, %", adjustment="none")],
-            "Possession": [m("Dribbles successful, %", adjustment="none"), m("Dribbling in the final third successful, %", adjustment="none"), m("Actions successful, %", adjustment="none"), m("Lost balls", False)],
-            "Passing": [m("Crosses accurate, %", adjustment="none"), m("Key passes accurate, %", adjustment="none"), m("Passes into the penalty box accurate, %", adjustment="none"), m("Progressive passes accurate, %", adjustment="none")],
-        },
-    },
-    "FW": {
-        "axis_labels": {
-            "Offensive": "Box threat / finishing",
-            "Defensive": "Pressing & physical duels",
-            "Possession": "Hold-up / carrying",
-            "Passing": "Link play / chance creation",
-        },
-        "style": {
-            "Offensive": [m("Shots"), m("xG (expected goals)"), m("Shots from the penalty area"), m("Actions in opponent's box"), m("Open passes received in the opponent's box")],
-            "Defensive": [m("Attacking challenges", adjustment="off_ball"), m("Defensive challenges", adjustment="off_ball"), m("Ball recoveries in opponent's half", adjustment="off_ball"), m("Air challenges", adjustment="off_ball")],
-            "Possession": [m("Open passes received"), m("Open passes received in the final third"), m("Attacking challenges"), m("Dribbles"), m("Carry")],
-            "Passing": [m("Passes"), m("Key passes"), m("Passes for a shot"), m("Progressive passes"), m("xA")],
-        },
-        "performance": {
-            "Offensive": [m("Goals"), m("Shots on target, %", adjustment="none"), m("xGPS (xG per shot)", adjustment="none"), m("xGC (xG conversion)", adjustment="none"), m("Chances successful, %", adjustment="none")],
-            "Defensive": [m("Attacking challenges won, %", adjustment="none"), m("Defensive challenges won, %", adjustment="none"), m("Air challenges won, %", adjustment="none"), m("Tackles successful, %", adjustment="none")],
-            "Possession": [m("Actions successful, %", adjustment="none"), m("Dribbles successful, %", adjustment="none"), m("Lost balls", False), m("Bad ball control", False)],
-            "Passing": [m("Passes accurate, %", adjustment="none"), m("Key passes accurate, %", adjustment="none"), m("Progressive passes accurate, %", adjustment="none"), m("xA")],
-        },
-    },
-    "GK": {
-        "axis_labels": {
-            "Offensive": "Launch / transition starter",
-            "Defensive": "Shot stopping & box command",
-            "Possession": "Security under pressure",
-            "Passing": "Build-up distribution",
-        },
-        "style": {
-            "Offensive": [m("Progressive open passes"), m("Long passes"), m("Goal kicks long (40+ m)"), m("Throws")],
-            "Defensive": [m("Shots on target faced", adjustment="off_ball"), m("Opponent's shots xG", adjustment="off_ball"), m("Opponent's crosses", adjustment="off_ball"), m("Cross and pass interception attempts", adjustment="off_ball"), m("Sweeping actions", adjustment="off_ball")],
-            "Possession": [m("Actions"), m("Open play passes"), m("Sweeping actions"), m("Throws")],
-            "Passing": [m("Passes"), m("Open play passes"), m("Short passes"), m("Medium passes"), m("Progressive open passes")],
-        },
-        "performance": {
-            "Offensive": [m("Long passes accurate, %", adjustment="none"), m("Goal kicks long (40+ m) accurate, %", adjustment="none"), m("Throws accurate, %", adjustment="none")],
-            "Defensive": [m("Goals prevented"), m("Goals prevented, %", adjustment="none"), m("Shots saved, %", adjustment="none"), m("Cross claim rate", adjustment="none"), m("Sweeping actions successful, %", adjustment="none")],
-            "Possession": [m("Actions successful, %", adjustment="none"), m("Mistakes leading to chances", False, "none"), m("Mistakes leading to goals", False, "none"), m("Open play passes accurate, %", adjustment="none")],
-            "Passing": [m("Passes accurate, %", adjustment="none"), m("Open play passes accurate, %", adjustment="none"), m("Short passes accurate, %", adjustment="none"), m("Medium passes accurate, %", adjustment="none")],
-        },
-    },
-}
-
-# ============================================================
-# DATA LOADERS
-# ============================================================
-
 @st.cache_data(show_spinner=False)
 def load_outfield() -> pd.DataFrame:
-    df = pd.read_csv(PLAYERS_FILE, compression="gzip")
+    df = pd.read_csv(PLAYERS_FILE, compression="gzip", low_memory=False)
     return standardize_base_columns(df)
 
 
 @st.cache_data(show_spinner=False)
 def load_gk() -> pd.DataFrame:
-    df = pd.read_csv(GK_FILE, compression="gzip")
+    df = pd.read_csv(GK_FILE, compression="gzip", low_memory=False)
     return standardize_base_columns(df)
 
 
@@ -354,7 +441,95 @@ def standardize_base_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ============================================================
-# REFERENCE + PLOT
+# CALCOLO PERCENTILI
+# ============================================================
+
+def possession_adjust(raw: pd.Series, possession: pd.Series, adjustment: str, k: float = 8.0, gamma: float = 0.35) -> pd.Series:
+    raw = pd.to_numeric(raw, errors="coerce")
+    if adjustment == "none":
+        return raw
+    possession = pd.to_numeric(possession, errors="coerce")
+    # Ball possession è 0-1 nei file processati.
+    s = 2 / (1 + np.exp(-k * (possession - 0.50))) - 1
+    if adjustment == "on_ball":
+        return raw * (1 - gamma * s)
+    if adjustment == "off_ball":
+        return raw * (1 + gamma * s)
+    return raw
+
+
+def metric_series(df: pd.DataFrame, spec: dict[str, Any], mode: str) -> pd.Series:
+    col = spec["column"]
+    if col not in df.columns:
+        return pd.Series(np.nan, index=df.index)
+    raw = clean_numeric(df[col])
+    if mode == "Possession-adjusted":
+        possession = clean_numeric(df.get("Ball possession, %", pd.Series(np.nan, index=df.index)))
+        return possession_adjust(raw, possession, spec.get("adjustment", "none"))
+    return raw
+
+
+def pct_rank(value: float, reference_values: pd.Series, reverse: bool = False) -> float:
+    values = pd.to_numeric(reference_values, errors="coerce").dropna()
+    if pd.isna(value) or len(values) < 3:
+        return np.nan
+    pct = 100 * ((values < value).sum() + 0.5 * (values == value).sum()) / len(values)
+    if reverse:
+        pct = 100 - pct
+    return float(np.clip(pct, 0, 100))
+
+
+def compute_metric_values(player_row: pd.Series, reference_df: pd.DataFrame, specs: list[dict[str, Any]], mode: str) -> tuple[list[str], list[int], list[dict[str, Any]]]:
+    labels: list[str] = []
+    values: list[int] = []
+    records: list[dict[str, Any]] = []
+    player_df = player_row.to_frame().T
+
+    for spec in specs:
+        col = spec["column"]
+        if col not in reference_df.columns or col not in player_row.index:
+            records.append({
+                "Metric label": spec["label"].replace("\n", " "),
+                "Column": col,
+                "Family": spec["family"],
+                "Raw value": np.nan,
+                "Percentile": np.nan,
+                "Used": False,
+            })
+            continue
+
+        raw_value = metric_series(player_df, spec, mode).iloc[0]
+        ref_values = metric_series(reference_df, spec, mode)
+        percentile = pct_rank(raw_value, ref_values, reverse=spec.get("reverse", False))
+
+        records.append({
+            "Metric label": spec["label"].replace("\n", " "),
+            "Column": col,
+            "Family": spec["family"],
+            "Raw value": raw_value,
+            "Percentile": percentile,
+            "Reverse": bool(spec.get("reverse", False)),
+            "Adjustment": spec.get("adjustment", "none"),
+            "Used": not pd.isna(percentile),
+        })
+
+        if not pd.isna(percentile):
+            labels.append(spec["label"])
+            values.append(int(round(percentile)))
+
+    return labels, values, records
+
+
+def colors_for(specs: list[dict[str, Any]], used_records: list[dict[str, Any]]) -> list[str]:
+    # I colori seguono l'ordine delle metriche effettivamente usate.
+    out: list[str] = []
+    for spec, rec in zip(specs, used_records):
+        if rec.get("Used", False):
+            out.append(FAMILY_COLORS[spec["family"]])
+    return out
+
+# ============================================================
+# REFERENCE GROUP
 # ============================================================
 
 def build_reference(
@@ -383,45 +558,138 @@ def build_reference(
 
     return ref
 
+# ============================================================
+# PLOT — STESSA STRUTTURA DEL TEMPLATE CARICATO
+# ============================================================
 
-def radar_values(scores: dict[str, float], template: dict[str, Any]) -> tuple[list[str], list[float]]:
-    theta = [f"{axis}<br><span style='font-size:11px'>{template['axis_labels'][axis]}</span>" for axis in AXIS_ORDER]
-    values = [scores.get(axis, np.nan) for axis in AXIS_ORDER]
-    theta.append(theta[0])
-    values.append(values[0])
-    return theta, values
+def make_dual_pizza_figure(
+    player_row: pd.Series,
+    role: str,
+    reference_df: pd.DataFrame,
+    style_params: list[str],
+    style_values: list[int],
+    style_colors: list[str],
+    perf_params: list[str],
+    perf_values: list[int],
+    perf_colors: list[str],
+    mode: str,
+    reference_scope: str,
+) -> plt.Figure:
+    fig = plt.figure(figsize=(20, 14), facecolor=FIG_BG)
+    ax1 = fig.add_axes([0.05, 0.10, 0.40, 0.63], projection="polar")
+    ax2 = fig.add_axes([0.55, 0.10, 0.40, 0.63], projection="polar")
 
-
-def make_radar(title: str, scores: dict[str, float], template: dict[str, Any]) -> go.Figure:
-    theta, values = radar_values(scores, template)
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatterpolar(
-            r=values,
-            theta=theta,
-            fill="toself",
-            mode="lines+markers",
-            name=title,
-            hovertemplate="%{theta}<br>Percentile: %{r:.0f}<extra></extra>",
-        )
+    common_pizza_kwargs = dict(
+        background_color=FIG_BG,
+        straight_line_color=LINE_BLACK,
+        straight_line_lw=1.1,
+        last_circle_color=LINE_BLACK,
+        last_circle_lw=2.4,
+        other_circle_color=CIRCLE_GREY,
+        other_circle_lw=0.8,
     )
-    fig.update_layout(
-        title={"text": title, "x": 0.5, "xanchor": "center"},
-        showlegend=False,
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        margin=dict(l=40, r=40, t=70, b=40),
-        polar=dict(
-            bgcolor="white",
-            radialaxis=dict(visible=True, range=[0, 100], tickvals=[20, 40, 60, 80, 100]),
-            angularaxis=dict(direction="clockwise", rotation=90),
+
+    pizza1 = PyPizza(params=style_params, **common_pizza_kwargs)
+    pizza1.make_pizza(
+        style_values,
+        ax=ax1,
+        color_blank_space="same",
+        slice_colors=style_colors[:len(style_values)],
+        value_bck_colors=style_colors[:len(style_values)],
+        blank_alpha=0.15,
+        kwargs_slices=dict(edgecolor="black", linewidth=0.8),
+        kwargs_params=dict(color="black", fontsize=11),
+        kwargs_values=dict(
+            color="black", fontsize=10,
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="black", linewidth=1),
         ),
-        height=520,
     )
+
+    pizza2 = PyPizza(params=perf_params, **common_pizza_kwargs)
+    pizza2.make_pizza(
+        perf_values,
+        ax=ax2,
+        color_blank_space="same",
+        slice_colors=perf_colors[:len(perf_values)],
+        value_bck_colors=perf_colors[:len(perf_values)],
+        blank_alpha=0.15,
+        kwargs_slices=dict(edgecolor="black", linewidth=0.8),
+        kwargs_params=dict(color="black", fontsize=11),
+        kwargs_values=dict(
+            color="black", fontsize=10,
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="black", linewidth=1),
+        ),
+    )
+
+    name = str(player_row.get("Player", "—"))
+    age = player_row.get("Age", np.nan)
+    age_txt = f" ({int(age)})" if pd.notna(age) else ""
+    team = str(player_row.get("Team", "—"))
+    league = str(player_row.get("League", "—"))
+    season = str(player_row.get("Season", "—"))
+    minutes = player_row.get("Minutes played", np.nan)
+    minutes_txt = f"{int(minutes):,}" if pd.notna(minutes) else "NA"
+    position = str(player_row.get("Position", player_row.get("GK role", "GK")))
+    cluster = str(player_row.get("style_cluster_short_label", player_row.get("style_cluster_name", "—")))
+    cohort_txt = f"{reference_scope} {role} cohort"
+
+    fig.text(0.5, 0.93, f"{name}{age_txt} - {team}", ha="center", va="center", fontsize=40, fontweight="bold")
+    fig.text(
+        0.5, 0.875,
+        f"{league} | Season {season} | Pos {position} | {minutes_txt} minutes | Compared as {role} | n = {len(reference_df)} | {mode}",
+        ha="center", va="center", fontsize=16,
+    )
+    fig.text(0.5, 0.845, f"Cluster: {cluster}", ha="center", va="center", fontsize=15)
+
+    fig.text(0.25, 0.81, "Player Style", ha="center", va="center", fontsize=26, fontweight="bold")
+    fig.text(0.75, 0.81, "Performance", ha="center", va="center", fontsize=26, fontweight="bold")
+
+    # Legenda identica come logica al template caricato, ma con quattro famiglie.
+    fig.text(0.40, 0.765, "Attack", fontsize=16, ha="right")
+    fig.text(0.405, 0.765, "■", fontsize=20, color=BLUE, ha="left")
+    fig.text(0.52, 0.765, "Possession", fontsize=16, ha="right")
+    fig.text(0.525, 0.765, "■", fontsize=20, color=YELLOW, ha="left")
+    fig.text(0.64, 0.765, "Passing", fontsize=16, ha="right")
+    fig.text(0.645, 0.765, "■", fontsize=20, color=GREEN, ha="left")
+    fig.text(0.76, 0.765, "Defense", fontsize=16, ha="right")
+    fig.text(0.765, 0.765, "■", fontsize=20, color=RED, ha="left")
+
+    fig.text(
+        0.02, 0.03,
+        f"Percentile rank vs. {cohort_txt} | p90 values already normalized in source file | inverted metrics: lower is better",
+        ha="left", va="bottom", fontsize=11,
+    )
+
     return fig
 
 
-def player_label(row: pd.Series, role: str, reference_scope: str, reference_n: int) -> None:
+def fig_to_png_bytes(fig: plt.Figure, dpi: int = 300) -> bytes:
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
+    buf.seek(0)
+    return buf.read()
+
+# ============================================================
+# UI HELPERS
+# ============================================================
+
+def fmt_num(value: Any, digits: int = 0) -> str:
+    try:
+        if pd.isna(value):
+            return "—"
+        return f"{float(value):,.{digits}f}"
+    except Exception:
+        return "—"
+
+
+def select_one(options: list[str], label: str, default: str | None = None) -> str:
+    if not options:
+        return ""
+    index = options.index(default) if default in options else 0
+    return st.selectbox(label, options, index=index)
+
+
+def player_header(row: pd.Series, role: str, reference_scope: str, reference_n: int) -> None:
     name = row.get("Player", "—")
     team = row.get("Team", "—")
     league = row.get("League", "—")
@@ -446,23 +714,16 @@ def player_label(row: pd.Series, role: str, reference_scope: str, reference_n: i
     if pd.notna(cluster_name) and str(cluster_name) != str(cluster):
         st.caption(f"Cluster full label: {cluster_name}")
 
-
-def select_one(options: list[str], label: str, default: str | None = None) -> str:
-    if not options:
-        return ""
-    index = options.index(default) if default in options else 0
-    return st.selectbox(label, options, index=index)
-
 # ============================================================
-# UI
+# STREAMLIT APP
 # ============================================================
 
-st.title("Dual Role Radar")
-st.caption("Una app minimale: Style a sinistra, Performance a destra. Quattro assi fissi, contenuto ruolo-specifico.")
+st.title("Dual Role Pizza Radar")
+st.caption("Un solo grafico, stessa struttura del template: Player Style a sinistra, Performance a destra, metriche ruolo-specifiche.")
 
 with st.sidebar:
     st.subheader("Selezione")
-    role = st.selectbox("Role template", list(RADAR_TEMPLATES.keys()), help="Scegli il ruolo usato per template e percentili.")
+    role = st.selectbox("Role template", list(ROLE_TEMPLATES.keys()), help="Scegli il ruolo usato per template e percentili.")
     st.caption(ROLE_HELP[role])
 
     df = load_gk() if role == "GK" else load_outfield()
@@ -473,17 +734,16 @@ with st.sidebar:
 
     season_df = df[df["Season"].astype(str).eq(str(season))].copy()
     if role != "GK" and "Role bucket" in season_df.columns:
-        # Player selection remains broad enough to allow role-forced comparison,
-        # but default list is filtered to the selected role bucket.
-        season_df_for_player = season_df[season_df["Role bucket"].astype(str).eq(ROLE_TO_BUCKET[role])].copy()
-        if season_df_for_player.empty:
-            season_df_for_player = season_df.copy()
+        role_df = season_df[season_df["Role bucket"].astype(str).eq(ROLE_TO_BUCKET[role])].copy()
+        if role_df.empty:
+            role_df = season_df.copy()
     else:
-        season_df_for_player = season_df.copy()
+        role_df = season_df.copy()
 
-    leagues = ["All"] + sorted(season_df_for_player["League"].dropna().astype(str).unique().tolist())
+    leagues = ["All"] + sorted(role_df["League"].dropna().astype(str).unique().tolist())
     league_filter = st.selectbox("Filter teams by league", leagues)
-    team_pool = season_df_for_player.copy()
+
+    team_pool = role_df.copy()
     if league_filter != "All":
         team_pool = team_pool[team_pool["League"].astype(str).eq(league_filter)]
 
@@ -518,37 +778,79 @@ player_row = selected_rows.iloc[0]
 player_league = player_row.get("League", None)
 reference_df = build_reference(df, role, season, player_league, reference_scope, custom_leagues, min_minutes)
 
-template = RADAR_TEMPLATES[role]
-style_scores, perf_scores, detail_rows = compute_radar_scores(player_row, reference_df, template, mode)
+template = ROLE_TEMPLATES[role]
+style_params, style_values, style_records = compute_metric_values(player_row, reference_df, template["style"], mode)
+perf_params, perf_values, perf_records = compute_metric_values(player_row, reference_df, template["performance"], mode)
+style_colors = colors_for(template["style"], style_records)
+perf_colors = colors_for(template["performance"], perf_records)
 
-player_label(player_row, role, reference_scope, len(reference_df))
+player_header(player_row, role, reference_scope, len(reference_df))
+st.caption(f"Template: {template['display']} · {template['description']}")
 
 if len(reference_df) < 15:
     st.warning(f"Reference group piccolo: n = {len(reference_df)}. I percentili potrebbero essere instabili.")
 
-left, right = st.columns(2)
-with left:
-    st.plotly_chart(make_radar("Player Style", style_scores, template), use_container_width=True)
-with right:
-    st.plotly_chart(make_radar("Performance", perf_scores, template), use_container_width=True)
+if len(style_params) < 6 or len(perf_params) < 6:
+    st.error("Troppe poche metriche disponibili per disegnare il grafico. Controlla template e colonne del dataset.")
+    st.stop()
 
-score_df = pd.DataFrame({
-    "Axis": AXIS_ORDER,
-    "Meaning": [template["axis_labels"][a] for a in AXIS_ORDER],
-    "Style": [style_scores[a] for a in AXIS_ORDER],
-    "Performance": [perf_scores[a] for a in AXIS_ORDER],
-})
-score_df["Style"] = score_df["Style"].round(0).astype("Int64")
-score_df["Performance"] = score_df["Performance"].round(0).astype("Int64")
+fig = make_dual_pizza_figure(
+    player_row=player_row,
+    role=role,
+    reference_df=reference_df,
+    style_params=style_params,
+    style_values=style_values,
+    style_colors=style_colors,
+    perf_params=perf_params,
+    perf_values=perf_values,
+    perf_colors=perf_colors,
+    mode=mode,
+    reference_scope=reference_scope,
+)
 
-st.subheader("Axis scores")
-st.dataframe(score_df, hide_index=True, use_container_width=True)
+st.pyplot(fig, use_container_width=True, clear_figure=False)
 
-with st.expander("Metriche usate per ogni asse"):
-    details_df = pd.DataFrame(detail_rows)
-    for col in ["Style score", "Performance score"]:
-        details_df[col] = details_df[col].round(1)
-    st.dataframe(details_df, hide_index=True, use_container_width=True)
+png = fig_to_png_bytes(fig)
+st.download_button(
+    "Download PNG",
+    data=png,
+    file_name=f"{str(player_row.get('Player','player')).replace(' ', '_')}_{role}_dual_pizza.png",
+    mime="image/png",
+)
+plt.close(fig)
+
+st.subheader("Metriche del grafico")
+metric_rows = []
+for section, records in [("Player Style", style_records), ("Performance", perf_records)]:
+    for rec in records:
+        if rec.get("Used", False):
+            metric_rows.append({
+                "Section": section,
+                "Family": rec.get("Family"),
+                "Metric label": rec.get("Metric label"),
+                "Column": rec.get("Column"),
+                "Raw value": rec.get("Raw value"),
+                "Percentile": rec.get("Percentile"),
+                "Reverse": rec.get("Reverse", False),
+                "Adjustment": rec.get("Adjustment", "none"),
+            })
+
+metric_df = pd.DataFrame(metric_rows)
+if not metric_df.empty:
+    metric_df["Raw value"] = pd.to_numeric(metric_df["Raw value"], errors="coerce").round(2)
+    metric_df["Percentile"] = pd.to_numeric(metric_df["Percentile"], errors="coerce").round(0).astype("Int64")
+    st.dataframe(metric_df, hide_index=True, use_container_width=True)
+
+with st.expander("Metriche escluse perché non disponibili / non calcolabili"):
+    missing_rows = []
+    for section, records in [("Player Style", style_records), ("Performance", perf_records)]:
+        for rec in records:
+            if not rec.get("Used", False):
+                missing_rows.append({"Section": section, **rec})
+    if missing_rows:
+        st.dataframe(pd.DataFrame(missing_rows), hide_index=True, use_container_width=True)
+    else:
+        st.write("Nessuna metrica esclusa.")
 
 with st.expander("Reference group"):
     cols = [c for c in ["Player", "Team", "League", "Season", "Position", "Role bucket", "Minutes played", "style_cluster_short_label"] if c in reference_df.columns]

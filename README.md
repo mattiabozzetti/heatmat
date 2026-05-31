@@ -1,30 +1,22 @@
-# Dual Role Radar App
+# Dual Role Pizza Radar App
 
-App Streamlit minimale per generare due radar affiancati per giocatore:
+App Streamlit minimale per generare un unico grafico dual pizza/radar con:
 
-- **Player Style**: quanto il giocatore fa certe cose, quindi volume / coinvolgimento / identità.
-- **Performance**: quanto bene le fa, quindi qualità / successo / efficienza.
+- sinistra: **Player Style**
+- destra: **Performance**
+- tante metriche diverse per ruolo
+- colori a blocchi per famiglia metrica
+- resa grafica coerente con il template `radar_attaccanti_big5_perf_stile.py`
+- sfondo del grafico bianco
 
-Ogni template ruolo usa sempre 4 famiglie nello stesso ordine:
-
-1. Offensive
-2. Defensive
-3. Possession
-4. Passing
-
-I grafici hanno sfondo bianco e UI Streamlit base.
-
-## Avvio locale
+## Avvio
 
 ```bash
-cd dual_role_radar_app
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Dati attesi
+## Dati inclusi
 
 La cartella contiene già:
 
@@ -33,4 +25,14 @@ data/processed/players_enriched_with_clusters.csv.gz
 data/processed/gk_enriched_with_clusters.csv.gz
 ```
 
-L'app usa questi file per giocatori di movimento e portieri.
+## Ruoli disponibili
+
+- CB
+- FB/WB
+- MF
+- AM
+- W/RML
+- FW
+- GK
+
+Ogni template mantiene la stessa struttura visuale ma cambia le metriche usate per descrivere meglio il ruolo.
