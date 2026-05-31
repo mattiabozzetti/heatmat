@@ -775,32 +775,44 @@ def player_header(row: pd.Series, role: str, reference_scope: str, reference_n: 
 # STREAMLIT APP
 # ============================================================
 
+
 st.title("Dual Role Pizza Radar")
-st.caption("Un solo grafico, stessa struttura del template: Player Style a sinistra, Performance a destra, metriche ruolo-specifiche.")
+st.caption(
+    "Un solo grafico, stessa struttura del template: Player Style a sinistra, "
+    "Performance a destra, metriche ruolo-specifiche. La scelta del template è indipendente dal giocatore."
+)
+
+BUCKET_TO_TEMPLATE = {
+    "CB": "CB",
+    "FB": "FB/WB",
+    "MF": "MF",
+    "AM": "AM",
+    "W": "W/RML",
+    "FW": "FW",
+}
 
 with st.sidebar:
-    st.subheader("Selezione")
-    role = st.selectbox("Role template", list(ROLE_TEMPLATES.keys()), help="Scegli il ruolo usato per template e percentili.")
-    st.caption(ROLE_HELP[role])
+    st.subheader("Selezione giocatore")
 
-    df = load_gk() if role == "GK" else load_outfield()
+    player_database = st.radio(
+        "Player database",
+        ["Outfield players", "Goalkeepers"],
+        index=0,
+        help="Scegli da quale dataset pescare il giocatore. Il template di confronto si sceglie dopo ed è indipendente.",
+    )
+
+    df = load_gk() if player_database == "Goalkeepers" else load_outfield()
 
     seasons = sorted(df["Season"].dropna().astype(str).unique().tolist(), reverse=True)
     default_season = "2025-2026" if "2025-2026" in seasons else (seasons[0] if seasons else "")
     season = select_one(seasons, "Season", default=default_season)
 
     season_df = df[df["Season"].astype(str).eq(str(season))].copy()
-    if role != "GK" and "Role bucket" in season_df.columns:
-        role_df = season_df[season_df["Role bucket"].astype(str).eq(ROLE_TO_BUCKET[role])].copy()
-        if role_df.empty:
-            role_df = season_df.copy()
-    else:
-        role_df = season_df.copy()
 
-    leagues = ["All"] + sorted(role_df["League"].dropna().astype(str).unique().tolist())
+    leagues = ["All"] + sorted(season_df["League"].dropna().astype(str).unique().tolist())
     league_filter = st.selectbox("Filter teams by league", leagues)
 
-    team_pool = role_df.copy()
+    team_pool = season_df.copy()
     if league_filter != "All":
         team_pool = team_pool[team_pool["League"].astype(str).eq(league_filter)]
 
@@ -811,13 +823,46 @@ with st.sidebar:
     players = sorted(player_pool["Player"].dropna().astype(str).unique().tolist())
     player = select_one(players, "Player")
 
+    preview_rows = player_pool[player_pool["Player"].astype(str).eq(str(player))].copy()
+    preview_row = preview_rows.sort_values("Minutes played", ascending=False).iloc[0] if not preview_rows.empty else None
+
     st.divider()
-    st.subheader("Percentili")
+    st.subheader("Template e percentili")
+
+    if player_database == "Goalkeepers":
+        role_options = ["GK"]
+        default_role = "GK"
+    else:
+        role_options = ["CB", "FB/WB", "MF", "AM", "W/RML", "FW"]
+        actual_bucket = str(preview_row.get("Role bucket", "")) if preview_row is not None else ""
+        default_role = BUCKET_TO_TEMPLATE.get(actual_bucket, "MF")
+
+    role_index = role_options.index(default_role) if default_role in role_options else 0
+    role = st.selectbox(
+        "Compare/template as",
+        role_options,
+        index=role_index,
+        help=(
+            "Questo NON filtra il giocatore selezionato. Decide solo template grafico, metriche e cohort di percentili. "
+            "Così puoi vedere un LCM nei percentili AM, un winger nei percentili FW, ecc."
+        ),
+    )
+    st.caption(ROLE_HELP[role])
+
+    if preview_row is not None and player_database != "Goalkeepers":
+        actual_bucket = preview_row.get("Role bucket", "—")
+        actual_pos = preview_row.get("Position", "—")
+        st.caption(f"Actual player role: {actual_pos} · bucket {actual_bucket}. Compared as: {role}.")
+
     reference_scope = st.selectbox("Reference scope", ["Player league", "Big Five", "All leagues", "Custom leagues"], index=1)
     all_leagues = sorted(df["League"].dropna().astype(str).unique().tolist())
     custom_leagues: list[str] = []
     if reference_scope == "Custom leagues":
-        custom_leagues = st.multiselect("Custom leagues", all_leagues, default=[l for l in all_leagues if l in BIG_FIVE_LEAGUES])
+        custom_leagues = st.multiselect(
+            "Custom leagues",
+            all_leagues,
+            default=[l for l in all_leagues if l in BIG_FIVE_LEAGUES],
+        )
     min_minutes = st.slider("Minimum minutes", min_value=0, max_value=2500, value=600, step=100)
     mode = st.radio("Metric mode", ["Raw", "Possession-adjusted"], horizontal=False)
 
@@ -843,6 +888,15 @@ perf_colors = colors_for(template["performance"], perf_records)
 
 player_header(player_row, role, reference_scope, len(reference_df))
 st.caption(f"Template: {template['display']} · {template['description']}")
+
+if player_database != "Goalkeepers":
+    actual_bucket = player_row.get("Role bucket", "—")
+    actual_pos = player_row.get("Position", "—")
+    if str(BUCKET_TO_TEMPLATE.get(str(actual_bucket), actual_bucket)) != str(role):
+        st.info(
+            f"Questo giocatore è classificato come {actual_pos} / bucket {actual_bucket}, "
+            f"ma lo stai valutando con template e percentili {role}."
+        )
 
 if len(reference_df) < 15:
     st.warning(f"Reference group piccolo: n = {len(reference_df)}. I percentili potrebbero essere instabili.")
@@ -911,5 +965,9 @@ with st.expander("Metriche escluse perché non disponibili / non calcolabili"):
         st.write("Nessuna metrica esclusa.")
 
 with st.expander("Reference group"):
-    cols = [c for c in ["Player", "Team", "League", "Season", "Position", "Role bucket", "Minutes played", "style_cluster_short_label"] if c in reference_df.columns]
+    cols = [
+        c for c in [
+            "Player", "Team", "League", "Season", "Position", "Role bucket", "Minutes played", "style_cluster_short_label"
+        ] if c in reference_df.columns
+    ]
     st.dataframe(reference_df[cols].sort_values("Minutes played", ascending=False), hide_index=True, use_container_width=True)

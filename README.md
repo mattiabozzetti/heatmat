@@ -1,25 +1,35 @@
 # Dual Role Pizza App
 
-App Streamlit minimale per generare il grafico dual pizza `Player Style` + `Performance` mantenendo la resa del template originale caricato.
+App Streamlit minimale per creare un unico grafico **dual pizza** con la stessa struttura del template caricato:
 
-## Struttura richiesta su Streamlit Cloud
+- Player Style a sinistra
+- Performance a destra
+- tante metriche ruolo-specifiche
+- colori a blocchi per famiglia
+- background grafico bianco
 
-Quando carichi su GitHub, questi file devono stare nella root del repository, cioè allo stesso livello:
+## Novità v3
 
-```text
-app.py
-requirements.txt
-runtime.txt
-.streamlit/config.toml
-data/processed/players_enriched_with_clusters.csv.gz
-data/processed/gk_enriched_with_clusters.csv.gz
-```
+La scelta del **template/percentile role** è indipendente dal giocatore selezionato.
 
-Se `requirements.txt` non è nella stessa cartella di `app.py`, Streamlit Cloud non installa `matplotlib` e l'app dà errore su:
+Questo significa che puoi selezionare qualsiasi giocatore outfield e poi valutarlo, per esempio, come:
 
-```python
-import matplotlib.pyplot as plt
-```
+- CB
+- FB/WB
+- MF
+- AM
+- W/RML
+- FW
+
+Il template scelto controlla solo:
+
+1. metriche visualizzate nel grafico;
+2. cohort usata per i percentili;
+3. etichetta `Compared as`.
+
+Non filtra più la lista giocatori.
+
+Per i portieri si usa il database GK e il template GK dedicato.
 
 ## Avvio locale
 
@@ -28,21 +38,14 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Dipendenze principali
+## Struttura
 
-- streamlit
-- pandas
-- numpy
-- matplotlib
-- mplsoccer
-
-## Note
-
-Il grafico mantiene la struttura del template originale:
-
-- singola figura dual pizza
-- `Player Style` a sinistra
-- `Performance` a destra
-- sfondo del grafico bianco
-- metriche multiple per ruolo
-- colori a blocchi per famiglia tattica
+```text
+app.py
+requirements.txt
+runtime.txt
+.python-version
+.streamlit/config.toml
+data/processed/players_enriched_with_clusters.csv.gz
+data/processed/gk_enriched_with_clusters.csv.gz
+```
