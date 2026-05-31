@@ -1,38 +1,48 @@
-# Dual Role Pizza Radar App
+# Dual Role Pizza App
 
-App Streamlit minimale per generare un unico grafico dual pizza/radar con:
+App Streamlit minimale per generare il grafico dual pizza `Player Style` + `Performance` mantenendo la resa del template originale caricato.
 
-- sinistra: **Player Style**
-- destra: **Performance**
-- tante metriche diverse per ruolo
-- colori a blocchi per famiglia metrica
-- resa grafica coerente con il template `radar_attaccanti_big5_perf_stile.py`
-- sfondo del grafico bianco
+## Struttura richiesta su Streamlit Cloud
 
-## Avvio
+Quando carichi su GitHub, questi file devono stare nella root del repository, cioè allo stesso livello:
+
+```text
+app.py
+requirements.txt
+runtime.txt
+.streamlit/config.toml
+data/processed/players_enriched_with_clusters.csv.gz
+data/processed/gk_enriched_with_clusters.csv.gz
+```
+
+Se `requirements.txt` non è nella stessa cartella di `app.py`, Streamlit Cloud non installa `matplotlib` e l'app dà errore su:
+
+```python
+import matplotlib.pyplot as plt
+```
+
+## Avvio locale
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Dati inclusi
+## Dipendenze principali
 
-La cartella contiene già:
+- streamlit
+- pandas
+- numpy
+- matplotlib
+- mplsoccer
 
-```text
-data/processed/players_enriched_with_clusters.csv.gz
-data/processed/gk_enriched_with_clusters.csv.gz
-```
+## Note
 
-## Ruoli disponibili
+Il grafico mantiene la struttura del template originale:
 
-- CB
-- FB/WB
-- MF
-- AM
-- W/RML
-- FW
-- GK
-
-Ogni template mantiene la stessa struttura visuale ma cambia le metriche usate per descrivere meglio il ruolo.
+- singola figura dual pizza
+- `Player Style` a sinistra
+- `Performance` a destra
+- sfondo del grafico bianco
+- metriche multiple per ruolo
+- colori a blocchi per famiglia tattica

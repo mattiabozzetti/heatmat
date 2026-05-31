@@ -1,5 +1,5 @@
 streamlit>=1.36
-pandas>=2.0
-numpy>=1.24
-matplotlib>=3.7
-mplsoccer>=1.2
+pandas>=2.2
+numpy>=1.26
+matplotlib>=3.8
+mplsoccer>=1.4
