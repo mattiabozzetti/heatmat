@@ -34,7 +34,7 @@ st.set_page_config(page_title="Player Scatter Lab", page_icon="🔵", layout="wi
 
 st.title("Player Scatter Lab")
 st.caption(
-    "Scatter personalizzabili sui giocatori. Ogni punto usa i colori della squadra: riempimento = colore primario, bordo = colore secondario."
+    "Scatter personalizzabili sui giocatori. Ogni punto usa i colori della squadra: riempimento = colore primario, bordo = colore secondario, senza testo dentro i punti."
 )
 
 with st.sidebar:

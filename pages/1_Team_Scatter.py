@@ -103,7 +103,7 @@ if team_df.empty:
 all_teams = sorted(team_df["Team"].dropna().astype(str).unique().tolist())
 with st.sidebar:
     highlighted_teams = st.multiselect("Highlight teams", all_teams, default=all_teams[:1] if all_teams else [])
-    point_scale = st.slider("Point size", 220, 700, 430, 10)
+    point_scale = st.slider("Point size", 320, 900, 560, 10)
 
 color_overrides = parse_color_overrides(overrides_text)
 plot_df = add_color_columns(team_df, overrides=color_overrides)
@@ -144,7 +144,7 @@ if show_initials:
             str(row["_abbr"]),
             ha="center",
             va="center",
-            fontsize=11.5,
+            fontsize=9.5,
             fontweight="bold",
             color=row["_text_color"],
             zorder=6,
