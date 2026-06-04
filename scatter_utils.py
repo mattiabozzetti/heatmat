@@ -290,6 +290,68 @@ def team_colors(team: str, overrides: dict[str, tuple[str, str]] | None = None) 
     return fallback_team_colors(team)
 
 
+
+
+def hex_to_rgb01(hex_color: str) -> tuple[float, float, float]:
+    value = str(hex_color).strip().lstrip('#')
+    if len(value) != 6:
+        return (0.0, 0.0, 0.0)
+    try:
+        r = int(value[0:2], 16) / 255.0
+        g = int(value[2:4], 16) / 255.0
+        b = int(value[4:6], 16) / 255.0
+        return (r, g, b)
+    except ValueError:
+        return (0.0, 0.0, 0.0)
+
+
+def perceived_luminance(hex_color: str) -> float:
+    r, g, b = hex_to_rgb01(hex_color)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_text_color(fill_hex: str) -> str:
+    return "#111111" if perceived_luminance(fill_hex) >= 0.62 else "#FFFFFF"
+
+
+_GENERIC_TEAM_TOKENS = {
+    "ac", "acf", "afc", "as", "bc", "ca", "calcio", "cf", "club", "fc", "sc", "sfc",
+    "sporting", "ss", "ssc", "us", "usd", "u.s.", "1907", "1908", "1909", "1912", "1913", "1919"
+}
+
+
+def team_abbreviation(team: str) -> str:
+    name = str(team).strip()
+    if not name:
+        return "TEAM"
+    cleaned = re.sub(r"[^A-Za-z0-9 -]", " ", name)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    tokens = [t for t in re.split(r"[\s-]+", cleaned) if t]
+    if not tokens:
+        return cleaned[:3].upper()
+
+    lower_tokens = [t.lower() for t in tokens]
+
+    # Common Saudi / Arabic form: Al + club name => use the next token.
+    if lower_tokens[0] == "al" and len(tokens) >= 2:
+        core = tokens[1]
+        return core[:3].upper()
+
+    significant = [t for t in tokens if t.lower() not in _GENERIC_TEAM_TOKENS and not t.isdigit()]
+    if not significant:
+        significant = tokens
+
+    # If there is a clear first club word, prefer its first three letters.
+    if len(significant) == 1:
+        return significant[0][:3].upper()
+
+    first = significant[0]
+    if len(first) >= 3:
+        return first[:3].upper()
+
+    joined = "".join(t[0] for t in significant[:3]).upper()
+    return (joined or cleaned[:3].upper())[:3]
+
 def add_color_columns(df: pd.DataFrame, team_col: str = "Team", overrides: dict[str, tuple[str, str]] | None = None) -> pd.DataFrame:
     out = df.copy()
     colors = out[team_col].astype(str).apply(lambda t: team_colors(t, overrides))

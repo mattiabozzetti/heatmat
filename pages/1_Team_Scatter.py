@@ -4,7 +4,6 @@ from pathlib import Path
 import sys
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -22,12 +21,14 @@ from scatter_utils import (  # noqa: E402
     aggregate_teams,
     apply_base_filters,
     clean_numeric,
+    contrast_text_color,
     fig_to_png_bytes,
     load_outfield,
     nice_metric_label,
     numeric_metric_columns,
     parse_color_overrides,
     safe_filename,
+    team_abbreviation,
 )
 
 st.set_page_config(page_title="Team Scatter Lab", page_icon="🟢", layout="wide")
@@ -35,7 +36,7 @@ st.set_page_config(page_title="Team Scatter Lab", page_icon="🟢", layout="wide
 st.title("Team Scatter Lab")
 st.caption(
     "Scatter personalizzabili sulle squadre. I valori squadra sono aggregati dai giocatori outfield con media pesata per minuti; "
-    "il riempimento del punto è il colore primario della squadra e il bordo è il colore secondario."
+    "ogni punto ha dimensione uniforme, riempimento nel colore primario del club, bordo nel colore secondario e sigla a tre lettere al centro."
 )
 
 players = load_outfield()
@@ -71,9 +72,9 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Aspetto")
-    label_mode = st.radio("Team labels", ["Highlighted only", "All teams", "No labels"], index=0)
-    size_by_minutes = st.checkbox("Size by total minutes", value=True)
+    label_mode = st.radio("Outside labels", ["Highlighted only", "All teams", "No labels"], index=0)
     reference_lines = st.checkbox("Median reference lines", value=True)
+    show_initials = st.checkbox("Show 3-letter team codes inside points", value=True)
     overrides_text = st.text_area(
         "Optional colour overrides",
         value="",
@@ -102,30 +103,25 @@ if team_df.empty:
 all_teams = sorted(team_df["Team"].dropna().astype(str).unique().tolist())
 with st.sidebar:
     highlighted_teams = st.multiselect("Highlight teams", all_teams, default=all_teams[:1] if all_teams else [])
-    point_scale = st.slider("Point size", 60, 500, 220, 20)
+    point_scale = st.slider("Point size", 220, 700, 430, 10)
 
 color_overrides = parse_color_overrides(overrides_text)
 plot_df = add_color_columns(team_df, overrides=color_overrides)
 plot_df["_highlight"] = plot_df["Team"].astype(str).isin(highlighted_teams)
+plot_df["_abbr"] = plot_df["Team"].astype(str).apply(team_abbreviation)
+plot_df["_text_color"] = plot_df["_fill_color"].astype(str).apply(contrast_text_color)
 
 x = clean_numeric(plot_df[x_metric])
 y = clean_numeric(plot_df[y_metric])
 
-fig = plt.figure(figsize=(10, 10), dpi=220, facecolor=FIG_BG)
+fig = plt.figure(figsize=(10.5, 10), dpi=220, facecolor=FIG_BG)
 ax = fig.add_subplot(111)
 ax.set_facecolor(FIG_BG)
 
-if size_by_minutes:
-    minutes = clean_numeric(plot_df["Total minutes"]).fillna(0)
-    if minutes.max() > minutes.min():
-        sizes = point_scale * (0.70 + 0.90 * (minutes - minutes.min()) / (minutes.max() - minutes.min()))
-    else:
-        sizes = pd.Series(point_scale, index=plot_df.index)
-else:
-    sizes = pd.Series(point_scale, index=plot_df.index)
+sizes = pd.Series(float(point_scale), index=plot_df.index)
 
 # Draw non-highlighted first and highlighted second to keep focus clubs on top.
-for is_highlight, alpha, lw, z in [(False, 0.72, 1.6, 3), (True, 0.98, 2.6, 5)]:
+for is_highlight, alpha, lw, z in [(False, 0.90, 1.7, 3), (True, 1.00, 2.5, 5)]:
     sub = plot_df[plot_df["_highlight"].eq(is_highlight)]
     if sub.empty:
         continue
@@ -139,6 +135,20 @@ for is_highlight, alpha, lw, z in [(False, 0.72, 1.6, 3), (True, 0.98, 2.6, 5)]:
         alpha=alpha,
         zorder=z,
     )
+
+if show_initials:
+    for _, row in plot_df.iterrows():
+        ax.text(
+            row[x_metric],
+            row[y_metric],
+            str(row["_abbr"]),
+            ha="center",
+            va="center",
+            fontsize=11.5,
+            fontweight="bold",
+            color=row["_text_color"],
+            zorder=6,
+        )
 
 if reference_lines:
     ax.axvline(x.median(), color=GRID_COLOR, linestyle="--", linewidth=0.9, zorder=1)
@@ -169,7 +179,7 @@ for _, row in label_df.iterrows():
     ax.annotate(
         str(row["Team"]),
         (row[x_metric], row[y_metric]),
-        xytext=(7, 5),
+        xytext=(9, 6),
         textcoords="offset points",
         fontsize=8.5 if label_mode == "All teams" else 10.5,
         fontweight="bold" if row.get("_highlight", False) else "normal",
@@ -191,7 +201,7 @@ fig.text(
 fig.text(
     0.02,
     0.018,
-    "Point fill = team primary colour; point border = team secondary colour. Team values are minutes-weighted means from outfield players.",
+    "Point fill = team primary colour; point border = team secondary colour. All points use the same size and display a 3-letter team code.",
     ha="left",
     va="bottom",
     fontsize=7,
@@ -210,7 +220,7 @@ st.download_button(
 plt.close(fig)
 
 st.subheader("Dati plottati")
-show_cols = ["Season", "League", "Team", "Players", "Total minutes", x_metric, y_metric, "_fill_color", "_edge_color"]
+show_cols = ["Season", "League", "Team", "Players", "Total minutes", x_metric, y_metric, "_abbr", "_fill_color", "_edge_color"]
 show_cols = [c for c in show_cols if c in plot_df.columns]
 display_df = plot_df[show_cols].sort_values(y_metric, ascending=False).copy()
 for col in ["Total minutes", x_metric, y_metric]:
