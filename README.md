@@ -49,3 +49,25 @@ runtime.txt
 data/processed/players_enriched_with_clusters.csv.gz
 data/processed/gk_enriched_with_clusters.csv.gz
 ```
+
+## Novità v4 — Scatter Lab
+
+Sono state aggiunte due pagine multipage in `pages/`:
+
+- `Team Scatter Lab`: scatter personalizzabili sulle squadre, aggregati dai giocatori outfield con media pesata per minuti.
+- `Player Scatter Lab`: scatter personalizzabili sui giocatori outfield o sui portieri.
+
+In entrambe le pagine il punto usa il colore della squadra:
+
+- riempimento = colore primario;
+- bordo = colore secondario.
+
+Sono inclusi filtri per stagione, campionato, Big Five, minuti minimi, team/ruoli/cluster, selezione libera delle metriche X/Y, highlight, etichette e download PNG.
+
+Per correggere colori squadra specifici si può usare il box `Optional colour overrides` nel formato:
+
+```text
+Team,#PRIMARY,#SECONDARY
+Inter Milan,#0057B8,#000000
+AC Milan,#FB090B,#000000
+```
