@@ -27,6 +27,14 @@ PLAYERS_FILE = DATA_DIR / "players_enriched_with_clusters.csv.gz"
 GK_FILE = DATA_DIR / "gk_enriched_with_clusters.csv.gz"
 
 BIG_FIVE_LEAGUES = {"Serie A", "Premier League", "La Liga", "Bundesliga", "Ligue 1"}
+BIG_FIVE_COMPETITIONS = {
+    ("Serie A", "Italy"),
+    ("Premier League", "England"),
+    ("La Liga", "Spain"),
+    ("Bundesliga", "Germany"),
+    ("Ligue 1", "France"),
+}
+LEAGUE_DISPLAY_COL = "League display"
 
 # Stile grafico coerente con il template caricato.
 FIG_BG = "#FFFFFF"   # richiesto: background grafico white
@@ -438,10 +446,57 @@ def standardize_base_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["Minutes played"] = clean_numeric(df["Minutes played"])
     if "style_cluster_confidence" in df.columns:
         df["style_cluster_confidence"] = clean_numeric(df["style_cluster_confidence"])
+    if "League" in df.columns:
+        df[LEAGUE_DISPLAY_COL] = build_league_display(df)
     return df
+
+
+def build_league_display(df: pd.DataFrame) -> pd.Series:
+    league = df["League"].astype(str).replace("nan", np.nan) if "League" in df.columns else pd.Series("", index=df.index)
+    if "Nation" not in df.columns:
+        return league
+    nation = df["Nation"].astype(str).replace("nan", np.nan)
+    has_nation = nation.notna() & nation.str.strip().ne("")
+    return league.where(~has_nation, league + " (" + nation + ")")
+
+
+def league_display_values(df: pd.DataFrame) -> list[str]:
+    if LEAGUE_DISPLAY_COL not in df.columns and "League" in df.columns:
+        df = df.copy()
+        df[LEAGUE_DISPLAY_COL] = build_league_display(df)
+    if LEAGUE_DISPLAY_COL not in df.columns:
+        return []
+    cols = [c for c in ["Nation", "League", LEAGUE_DISPLAY_COL] if c in df.columns]
+    values = (
+        df[cols]
+        .dropna(subset=[LEAGUE_DISPLAY_COL])
+        .drop_duplicates()
+        .sort_values([c for c in ["Nation", "League", LEAGUE_DISPLAY_COL] if c in cols])
+    )
+    return values[LEAGUE_DISPLAY_COL].astype(str).tolist()
+
+
+def big_five_mask(df: pd.DataFrame) -> pd.Series:
+    if "League" not in df.columns:
+        return pd.Series(False, index=df.index)
+    league = df["League"].astype(str)
+    if "Nation" in df.columns:
+        nation = df["Nation"].astype(str)
+        mask = pd.Series(False, index=df.index)
+        for league_name, country in BIG_FIVE_COMPETITIONS:
+            mask = mask | (league.eq(league_name) & nation.eq(country))
+        return mask
+    return league.isin(BIG_FIVE_LEAGUES)
+
+
+def big_five_league_display_values(df: pd.DataFrame) -> list[str]:
+    if "League" not in df.columns:
+        return []
+    return league_display_values(df[big_five_mask(df)].copy())
 
 # ============================================================
 # CALCOLO PERCENTILI
+
 # ============================================================
 
 def possession_adjust(raw: pd.Series, possession: pd.Series, adjustment: str, k: float = 8.0, gamma: float = 0.35) -> pd.Series:
@@ -605,11 +660,17 @@ def build_reference(
         ref = ref[ref["Role bucket"].astype(str).eq(ROLE_TO_BUCKET[role])]
 
     if reference_scope == "Player league" and player_league:
-        ref = ref[ref["League"].astype(str).eq(str(player_league))]
+        if LEAGUE_DISPLAY_COL in ref.columns:
+            ref = ref[ref[LEAGUE_DISPLAY_COL].astype(str).eq(str(player_league))]
+        else:
+            ref = ref[ref["League"].astype(str).eq(str(player_league))]
     elif reference_scope == "Big Five":
-        ref = ref[ref["League"].isin(BIG_FIVE_LEAGUES)]
+        ref = ref[big_five_mask(ref)]
     elif reference_scope == "Custom leagues" and custom_leagues:
-        ref = ref[ref["League"].isin(custom_leagues)]
+        if LEAGUE_DISPLAY_COL in ref.columns:
+            ref = ref[ref[LEAGUE_DISPLAY_COL].astype(str).isin(custom_leagues)]
+        else:
+            ref = ref[ref["League"].astype(str).isin(custom_leagues)]
     elif reference_scope == "All leagues":
         pass
 
@@ -682,7 +743,7 @@ def make_dual_pizza_figure(
     age = player_row.get("Age", np.nan)
     age_txt = f" ({int(age)})" if pd.notna(age) else ""
     team = str(player_row.get("Team", "—"))
-    league = str(player_row.get("League", "—"))
+    league = str(player_row.get(LEAGUE_DISPLAY_COL, player_row.get("League", "—")))
     season = str(player_row.get("Season", "—"))
     minutes = player_row.get("Minutes played", np.nan)
     minutes_txt = f"{int(minutes):,}" if pd.notna(minutes) else "NA"
@@ -749,7 +810,7 @@ def select_one(options: list[str], label: str, default: str | None = None) -> st
 def player_header(row: pd.Series, role: str, reference_scope: str, reference_n: int) -> None:
     name = row.get("Player", "—")
     team = row.get("Team", "—")
-    league = row.get("League", "—")
+    league = row.get(LEAGUE_DISPLAY_COL, row.get("League", "—"))
     season = row.get("Season", "—")
     position = row.get("Position", row.get("GK role", "GK"))
     minutes = fmt_num(row.get("Minutes played"), 0)
@@ -809,12 +870,12 @@ with st.sidebar:
 
     season_df = df[df["Season"].astype(str).eq(str(season))].copy()
 
-    leagues = ["All"] + sorted(season_df["League"].dropna().astype(str).unique().tolist())
+    leagues = ["All"] + league_display_values(season_df)
     league_filter = st.selectbox("Filter teams by league", leagues)
 
     team_pool = season_df.copy()
     if league_filter != "All":
-        team_pool = team_pool[team_pool["League"].astype(str).eq(league_filter)]
+        team_pool = team_pool[team_pool[LEAGUE_DISPLAY_COL].astype(str).eq(league_filter)]
 
     teams = sorted(team_pool["Team"].dropna().astype(str).unique().tolist())
     team = select_one(teams, "Team")
@@ -855,13 +916,13 @@ with st.sidebar:
         st.caption(f"Actual player role: {actual_pos} · bucket {actual_bucket}. Compared as: {role}.")
 
     reference_scope = st.selectbox("Reference scope", ["Player league", "Big Five", "All leagues", "Custom leagues"], index=1)
-    all_leagues = sorted(df["League"].dropna().astype(str).unique().tolist())
+    all_leagues = league_display_values(df)
     custom_leagues: list[str] = []
     if reference_scope == "Custom leagues":
         custom_leagues = st.multiselect(
             "Custom leagues",
             all_leagues,
-            default=[l for l in all_leagues if l in BIG_FIVE_LEAGUES],
+            default=big_five_league_display_values(df),
         )
     min_minutes = st.slider("Minimum minutes", min_value=0, max_value=2500, value=600, step=100)
     mode = st.radio("Metric mode", ["Raw", "Possession-adjusted"], horizontal=False)
@@ -877,7 +938,7 @@ if selected_rows.empty:
 
 selected_rows = selected_rows.sort_values("Minutes played", ascending=False)
 player_row = selected_rows.iloc[0]
-player_league = player_row.get("League", None)
+player_league = player_row.get(LEAGUE_DISPLAY_COL, player_row.get("League", None))
 reference_df = build_reference(df, role, season, player_league, reference_scope, custom_leagues, min_minutes)
 
 template = ROLE_TEMPLATES[role]
@@ -967,7 +1028,7 @@ with st.expander("Metriche escluse perché non disponibili / non calcolabili"):
 with st.expander("Reference group"):
     cols = [
         c for c in [
-            "Player", "Team", "League", "Season", "Position", "Role bucket", "Minutes played", "style_cluster_short_label"
+            "Player", "Team", "League display", "League", "Nation", "Season", "Position", "Role bucket", "Minutes played", "style_cluster_short_label"
         ] if c in reference_df.columns
     ]
     st.dataframe(reference_df[cols].sort_values("Minutes played", ascending=False), hide_index=True, use_container_width=True)

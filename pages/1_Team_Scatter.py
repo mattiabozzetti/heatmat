@@ -13,14 +13,16 @@ if str(ROOT) not in sys.path:
 
 from scatter_utils import (  # noqa: E402
     AXIS_COLOR,
-    BIG_FIVE_LEAGUES,
     FIG_BG,
     GRID_COLOR,
     TEXT_MUTED,
     add_color_columns,
+    big_five_league_display_values,
+    big_five_mask,
     clean_numeric,
     contrast_text_color,
     fig_to_png_bytes,
+    league_display_values,
     load_team_base,
     nice_metric_label,
     numeric_metric_columns,
@@ -50,25 +52,25 @@ with st.sidebar:
     season = st.selectbox("Season", seasons, index=seasons.index(default_season) if default_season in seasons else 0)
 
     season_df = teams_base[teams_base["Season"].astype(str).eq(str(season))].copy()
-    leagues_available = sorted(season_df["League"].dropna().astype(str).unique().tolist())
+    leagues_available = league_display_values(season_df)
     league_choices = ["All leagues", "Big Five", "Custom leagues", *leagues_available]
     league_mode = st.selectbox("League scope", league_choices, index=1 if "Big Five" in league_choices else 0)
 
     selected_leagues: list[str] = []
     if league_mode == "Custom leagues":
-        default_custom = [l for l in leagues_available if l in BIG_FIVE_LEAGUES]
+        default_custom = big_five_league_display_values(season_df)
         selected_leagues = st.multiselect("Custom leagues", leagues_available, default=default_custom)
 
     filtered = season_df.copy()
     if league_mode == "Big Five":
-        filtered = filtered[filtered["League"].astype(str).isin(BIG_FIVE_LEAGUES)].copy()
+        filtered = filtered[big_five_mask(filtered)].copy()
     elif league_mode == "Custom leagues":
         if selected_leagues:
-            filtered = filtered[filtered["League"].astype(str).isin(selected_leagues)].copy()
+            filtered = filtered[filtered["League display"].astype(str).isin(selected_leagues)].copy()
         else:
             filtered = filtered.iloc[0:0].copy()
     elif league_mode != "All leagues":
-        filtered = filtered[filtered["League"].astype(str).eq(str(league_mode))].copy()
+        filtered = filtered[filtered["League display"].astype(str).eq(str(league_mode))].copy()
 
     if "Matches estimated" in filtered.columns:
         min_matches = st.slider("Minimum estimated matches", 0, 40, 0, 1)
@@ -199,7 +201,12 @@ for _, row in label_df.iterrows():
         zorder=7,
     )
 
-scope_txt = league_mode if league_mode != "Custom leagues" else ", ".join(selected_leagues) or "Custom leagues"
+if league_mode == "Big Five":
+    scope_txt = "Big Five (England, France, Germany, Italy, Spain)"
+elif league_mode == "Custom leagues":
+    scope_txt = ", ".join(selected_leagues) or "Custom leagues"
+else:
+    scope_txt = league_mode
 fig.text(0.08, 0.965, "Team Scatter Lab", ha="left", va="top", fontsize=22, fontweight="bold", color=AXIS_COLOR)
 fig.text(
     0.08,
@@ -233,7 +240,7 @@ plt.close(fig)
 
 st.subheader("Dati plottati")
 show_cols = [
-    "Season", "League", "Nation", "Competition", "Team", "Matches estimated", "Players in player dataset", "Player minutes total",
+    "Season", "League display", "League", "Nation", "Competition", "Team", "Matches estimated", "Players in player dataset", "Player minutes total",
     x_metric, y_metric, "_abbr", "_fill_color", "_edge_color",
 ]
 show_cols = [c for c in show_cols if c in plot_df.columns]

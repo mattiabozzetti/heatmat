@@ -18,6 +18,16 @@ GK_FILE = DATA_DIR / "gk_enriched_with_clusters.csv.gz"
 TEAM_FILE = DATA_DIR / "team_league_base.csv.gz"
 
 BIG_FIVE_LEAGUES = {"Serie A", "Premier League", "La Liga", "Bundesliga", "Ligue 1"}
+# True Big Five definition. This avoids including other leagues that share the
+# same generic name, especially Premier League (Russia).
+BIG_FIVE_COMPETITIONS = {
+    ("Serie A", "Italy"),
+    ("Premier League", "England"),
+    ("La Liga", "Spain"),
+    ("Bundesliga", "Germany"),
+    ("Ligue 1", "France"),
+}
+LEAGUE_DISPLAY_COL = "League display"
 
 FIG_BG = "#FFFFFF"
 AXIS_COLOR = "#111111"
@@ -134,6 +144,7 @@ TEAM_COLORS: dict[str, tuple[str, str]] = {
 
 NON_METRIC_EXACT = {
     "№", "Index", "Age", "Height", "Weight", "Season_key", "Season_fallback_key",
+    "League display",
     "style_cluster_id", "style_cluster_x", "style_cluster_y", "style_cluster_distance",
     "style_cluster_confidence", "style_cluster_min_minutes",
 }
@@ -178,8 +189,41 @@ def standardize_base_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].astype(str).replace("nan", np.nan)
     if "Minutes played" in df.columns:
         df["Minutes played"] = clean_numeric(df["Minutes played"])
+    if "League" in df.columns:
+        df[LEAGUE_DISPLAY_COL] = build_league_display(df)
     return df
 
+
+def build_league_display(df: pd.DataFrame) -> pd.Series:
+    league = df["League"].astype(str).replace("nan", np.nan) if "League" in df.columns else pd.Series("", index=df.index)
+    if "Nation" not in df.columns:
+        return league
+    nation = df["Nation"].astype(str).replace("nan", np.nan)
+    has_nation = nation.notna() & nation.str.strip().ne("")
+    return league.where(~has_nation, league + " (" + nation + ")")
+
+
+def league_display_values(df: pd.DataFrame) -> list[str]:
+    if LEAGUE_DISPLAY_COL not in df.columns and "League" in df.columns:
+        df = df.copy()
+        df[LEAGUE_DISPLAY_COL] = build_league_display(df)
+    if LEAGUE_DISPLAY_COL not in df.columns:
+        return []
+    cols = [c for c in ["Nation", "League", LEAGUE_DISPLAY_COL] if c in df.columns]
+    values = (
+        df[cols]
+        .dropna(subset=[LEAGUE_DISPLAY_COL])
+        .drop_duplicates()
+        .sort_values([c for c in ["Nation", "League", LEAGUE_DISPLAY_COL] if c in cols])
+    )
+    return values[LEAGUE_DISPLAY_COL].astype(str).tolist()
+
+
+def big_five_league_display_values(df: pd.DataFrame) -> list[str]:
+    if "League" not in df.columns:
+        return []
+    sub = df[big_five_mask(df)].copy()
+    return league_display_values(sub)
 
 def numeric_metric_columns(df: pd.DataFrame, min_non_null: int = 8) -> list[str]:
     out: list[str] = []
@@ -206,11 +250,18 @@ def numeric_metric_columns(df: pd.DataFrame, min_non_null: int = 8) -> list[str]
 
 
 def big_five_mask(df: pd.DataFrame) -> pd.Series:
-    """Big Five helper: excludes the non-English Premier League rows when Nation is available."""
-    mask = df["League"].isin(BIG_FIVE_LEAGUES)
+    """True Big Five helper: league-name + nation, not league-name alone."""
+    if "League" not in df.columns:
+        return pd.Series(False, index=df.index)
+    league = df["League"].astype(str)
     if "Nation" in df.columns:
-        mask = mask & ((df["League"] != "Premier League") | (df["Nation"].astype(str).eq("England")))
-    return mask
+        nation = df["Nation"].astype(str)
+        mask = pd.Series(False, index=df.index)
+        for league_name, country in BIG_FIVE_COMPETITIONS:
+            mask = mask | (league.eq(league_name) & nation.eq(country))
+        return mask
+    # Fallback only for datasets without Nation: this is less precise but keeps older files usable.
+    return league.isin(BIG_FIVE_LEAGUES)
 
 
 def apply_base_filters(
@@ -221,18 +272,25 @@ def apply_base_filters(
     min_minutes: int = 0,
 ) -> pd.DataFrame:
     out = df.copy()
+    if LEAGUE_DISPLAY_COL not in out.columns and "League" in out.columns:
+        out[LEAGUE_DISPLAY_COL] = build_league_display(out)
     if season and "Season" in out.columns:
         out = out[out["Season"].astype(str).eq(str(season))]
     if min_minutes > 0 and "Minutes played" in out.columns:
         out = out[clean_numeric(out["Minutes played"]).fillna(0) >= min_minutes]
     if league_mode == "Big Five" and "League" in out.columns:
         out = out[big_five_mask(out)]
-    elif league_mode == "Custom leagues" and selected_leagues and "League" in out.columns:
-        out = out[out["League"].isin(selected_leagues)]
-    elif league_mode not in {"All leagues", "Big Five", "Custom leagues"} and "League" in out.columns:
-        out = out[out["League"].astype(str).eq(str(league_mode))]
+    elif league_mode == "Custom leagues" and selected_leagues:
+        if LEAGUE_DISPLAY_COL in out.columns:
+            out = out[out[LEAGUE_DISPLAY_COL].astype(str).isin(selected_leagues)]
+        elif "League" in out.columns:
+            out = out[out["League"].astype(str).isin(selected_leagues)]
+    elif league_mode not in {"All leagues", "Big Five", "Custom leagues"}:
+        if LEAGUE_DISPLAY_COL in out.columns:
+            out = out[out[LEAGUE_DISPLAY_COL].astype(str).eq(str(league_mode))]
+        elif "League" in out.columns:
+            out = out[out["League"].astype(str).eq(str(league_mode))]
     return out.copy()
-
 
 def _valid_hex(value: str) -> bool:
     return bool(re.fullmatch(r"#[0-9A-Fa-f]{6}", str(value).strip()))

@@ -14,14 +14,15 @@ if str(ROOT) not in sys.path:
 
 from scatter_utils import (  # noqa: E402
     AXIS_COLOR,
-    BIG_FIVE_LEAGUES,
     FIG_BG,
     GRID_COLOR,
     TEXT_MUTED,
     add_color_columns,
     apply_base_filters,
+    big_five_league_display_values,
     clean_numeric,
     fig_to_png_bytes,
+    league_display_values,
     load_gk,
     load_outfield,
     nice_metric_label,
@@ -57,12 +58,12 @@ with st.sidebar:
     season = st.selectbox("Season", seasons, index=seasons.index(default_season) if default_season in seasons else 0)
 
     season_df = df[df["Season"].astype(str).eq(str(season))].copy()
-    leagues_available = sorted(season_df["League"].dropna().astype(str).unique().tolist())
+    leagues_available = league_display_values(season_df)
     league_choices = ["All leagues", "Big Five", "Custom leagues", *leagues_available]
     league_mode = st.selectbox("League scope", league_choices, index=1 if "Big Five" in league_choices else 0)
     selected_leagues: list[str] = []
     if league_mode == "Custom leagues":
-        default_custom = [l for l in leagues_available if l in BIG_FIVE_LEAGUES]
+        default_custom = big_five_league_display_values(season_df)
         selected_leagues = st.multiselect("Custom leagues", leagues_available, default=default_custom)
 
     min_minutes = st.slider("Minimum minutes", 0, 3000, 600, 100)
@@ -218,7 +219,12 @@ for _, row in label_df.iterrows():
         zorder=8,
     )
 
-scope_txt = league_mode if league_mode != "Custom leagues" else ", ".join(selected_leagues) or "Custom leagues"
+if league_mode == "Big Five":
+    scope_txt = "Big Five (England, France, Germany, Italy, Spain)"
+elif league_mode == "Custom leagues":
+    scope_txt = ", ".join(selected_leagues) or "Custom leagues"
+else:
+    scope_txt = league_mode
 fig.text(0.08, 0.965, "Player Scatter Lab", ha="left", va="top", fontsize=22, fontweight="bold", color=AXIS_COLOR)
 fig.text(
     0.08,
@@ -252,7 +258,7 @@ plt.close(fig)
 
 st.subheader("Dati plottati")
 show_cols = [
-    "Season", "League", "Team", "Player", "Age", position_col, role_col, "Minutes played",
+    "Season", "League display", "League", "Nation", "Team", "Player", "Age", position_col, role_col, "Minutes played",
     "style_cluster_short_label", x_metric, y_metric, "_fill_color", "_edge_color",
 ]
 show_cols = [c for c in show_cols if c in plot_df.columns]
