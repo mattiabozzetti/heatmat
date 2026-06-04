@@ -71,3 +71,8 @@ Team,#PRIMARY,#SECONDARY
 Inter Milan,#0057B8,#000000
 AC Milan,#FB090B,#000000
 ```
+
+## Scatter pages update
+
+- `pages/1_Team_Scatter.py` now uses the team-level file `data/processed/team_league_base.csv.gz` directly. Team points are no longer reconstructed by aggregating single-player rows.
+- `pages/2_Player_Scatter.py` remains based on player/GK datasets and does not show text inside player points.

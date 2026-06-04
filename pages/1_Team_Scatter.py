@@ -18,12 +18,10 @@ from scatter_utils import (  # noqa: E402
     GRID_COLOR,
     TEXT_MUTED,
     add_color_columns,
-    aggregate_teams,
-    apply_base_filters,
     clean_numeric,
     contrast_text_color,
     fig_to_png_bytes,
-    load_outfield,
+    load_team_base,
     nice_metric_label,
     numeric_metric_columns,
     parse_color_overrides,
@@ -35,38 +33,58 @@ st.set_page_config(page_title="Team Scatter Lab", page_icon="🟢", layout="wide
 
 st.title("Team Scatter Lab")
 st.caption(
-    "Scatter personalizzabili sulle squadre. I valori squadra sono aggregati dai giocatori outfield con media pesata per minuti; "
-    "ogni punto ha dimensione uniforme, riempimento nel colore primario del club, bordo nel colore secondario e sigla a tre lettere al centro."
+    "Scatter personalizzabili sulle squadre usando direttamente il dataset team-level `team_league_base.csv.gz`. "
+    "Ogni punto è una squadra: dimensione uniforme, riempimento nel colore primario del club, bordo nel colore secondario e sigla a tre lettere al centro."
 )
 
-players = load_outfield()
-metric_options = numeric_metric_columns(players)
+teams_base = load_team_base()
+metric_options = numeric_metric_columns(teams_base)
 if not metric_options:
     st.error("Non trovo colonne numeriche utilizzabili per costruire gli scatter.")
     st.stop()
 
 with st.sidebar:
     st.subheader("Filtri")
-    seasons = sorted(players["Season"].dropna().astype(str).unique().tolist(), reverse=True)
+    seasons = sorted(teams_base["Season"].dropna().astype(str).unique().tolist(), reverse=True)
     default_season = "2025-2026" if "2025-2026" in seasons else (seasons[0] if seasons else None)
     season = st.selectbox("Season", seasons, index=seasons.index(default_season) if default_season in seasons else 0)
 
-    leagues_available = sorted(players.loc[players["Season"].astype(str).eq(str(season)), "League"].dropna().astype(str).unique().tolist())
+    season_df = teams_base[teams_base["Season"].astype(str).eq(str(season))].copy()
+    leagues_available = sorted(season_df["League"].dropna().astype(str).unique().tolist())
     league_choices = ["All leagues", "Big Five", "Custom leagues", *leagues_available]
     league_mode = st.selectbox("League scope", league_choices, index=1 if "Big Five" in league_choices else 0)
+
     selected_leagues: list[str] = []
     if league_mode == "Custom leagues":
         default_custom = [l for l in leagues_available if l in BIG_FIVE_LEAGUES]
         selected_leagues = st.multiselect("Custom leagues", leagues_available, default=default_custom)
 
-    min_player_minutes = st.slider("Minimum player minutes", 0, 3000, 600, 100)
-    min_team_players = st.slider("Minimum plotted players per team", 1, 30, 8, 1)
-    min_team_minutes = st.slider("Minimum total team minutes", 0, 45000, 8000, 500)
+    filtered = season_df.copy()
+    if league_mode == "Big Five":
+        filtered = filtered[filtered["League"].astype(str).isin(BIG_FIVE_LEAGUES)].copy()
+    elif league_mode == "Custom leagues":
+        if selected_leagues:
+            filtered = filtered[filtered["League"].astype(str).isin(selected_leagues)].copy()
+        else:
+            filtered = filtered.iloc[0:0].copy()
+    elif league_mode != "All leagues":
+        filtered = filtered[filtered["League"].astype(str).eq(str(league_mode))].copy()
+
+    if "Matches estimated" in filtered.columns:
+        min_matches = st.slider("Minimum estimated matches", 0, 40, 0, 1)
+        filtered = filtered[clean_numeric(filtered["Matches estimated"]).fillna(0) >= min_matches].copy()
+
+    if "Player minutes total" in filtered.columns:
+        min_player_coverage = st.slider("Minimum player-data coverage minutes", 0, 45000, 0, 500)
+        if min_player_coverage > 0:
+            filtered = filtered[clean_numeric(filtered["Player minutes total"]).fillna(0) >= min_player_coverage].copy()
 
     st.divider()
     st.subheader("Metriche")
-    default_x = "xG (expected goals)" if "xG (expected goals)" in metric_options else metric_options[0]
-    default_y = "Goals" if "Goals" in metric_options else metric_options[min(1, len(metric_options) - 1)]
+    default_x_candidates = ["xG/team derived", "xG total derived", "xGA per match weighted", "xGD total derived", "Goals - xG total derived"]
+    default_y_candidates = ["Goals", "Goals for total", "Goals total derived", "Goals/team derived"]
+    default_x = next((m for m in default_x_candidates if m in metric_options), metric_options[0])
+    default_y = next((m for m in default_y_candidates if m in metric_options), metric_options[min(1, len(metric_options) - 1)])
     x_metric = st.selectbox("X-axis", metric_options, index=metric_options.index(default_x))
     y_metric = st.selectbox("Y-axis", metric_options, index=metric_options.index(default_y))
 
@@ -75,6 +93,7 @@ with st.sidebar:
     label_mode = st.radio("Outside labels", ["Highlighted only", "All teams", "No labels"], index=0)
     reference_lines = st.checkbox("Median reference lines", value=True)
     show_initials = st.checkbox("Show 3-letter team codes inside points", value=True)
+    point_scale = st.slider("Point size", 320, 900, 600, 10)
     overrides_text = st.text_area(
         "Optional colour overrides",
         value="",
@@ -82,31 +101,24 @@ with st.sidebar:
         height=90,
     )
 
-filtered_players = apply_base_filters(players, season, league_mode, selected_leagues, min_player_minutes)
-if filtered_players.empty:
-    st.warning("Nessun giocatore disponibile con questi filtri.")
+if filtered.empty:
+    st.warning("Nessuna squadra disponibile con questi filtri.")
     st.stop()
 
-team_df = aggregate_teams(filtered_players, x_metric, y_metric)
-team_df = team_df[
-    (clean_numeric(team_df["Players"]).fillna(0) >= min_team_players)
-    & (clean_numeric(team_df["Total minutes"]).fillna(0) >= min_team_minutes)
-].copy()
-team_df[x_metric] = clean_numeric(team_df[x_metric])
-team_df[y_metric] = clean_numeric(team_df[y_metric])
-team_df = team_df.dropna(subset=[x_metric, y_metric])
+filtered[x_metric] = clean_numeric(filtered[x_metric])
+filtered[y_metric] = clean_numeric(filtered[y_metric])
+plot_df = filtered.dropna(subset=[x_metric, y_metric]).copy()
 
-if team_df.empty:
+if plot_df.empty:
     st.warning("Nessuna squadra plottabile dopo filtri e metriche selezionate.")
     st.stop()
 
-all_teams = sorted(team_df["Team"].dropna().astype(str).unique().tolist())
+all_teams = sorted(plot_df["Team"].dropna().astype(str).unique().tolist())
 with st.sidebar:
     highlighted_teams = st.multiselect("Highlight teams", all_teams, default=all_teams[:1] if all_teams else [])
-    point_scale = st.slider("Point size", 320, 900, 560, 10)
 
 color_overrides = parse_color_overrides(overrides_text)
-plot_df = add_color_columns(team_df, overrides=color_overrides)
+plot_df = add_color_columns(plot_df, overrides=color_overrides)
 plot_df["_highlight"] = plot_df["Team"].astype(str).isin(highlighted_teams)
 plot_df["_abbr"] = plot_df["Team"].astype(str).apply(team_abbreviation)
 plot_df["_text_color"] = plot_df["_fill_color"].astype(str).apply(contrast_text_color)
@@ -121,7 +133,7 @@ ax.set_facecolor(FIG_BG)
 sizes = pd.Series(float(point_scale), index=plot_df.index)
 
 # Draw non-highlighted first and highlighted second to keep focus clubs on top.
-for is_highlight, alpha, lw, z in [(False, 0.90, 1.7, 3), (True, 1.00, 2.5, 5)]:
+for is_highlight, alpha, lw, z in [(False, 0.90, 1.8, 3), (True, 1.00, 2.8, 5)]:
     sub = plot_df[plot_df["_highlight"].eq(is_highlight)]
     if sub.empty:
         continue
@@ -144,7 +156,7 @@ if show_initials:
             str(row["_abbr"]),
             ha="center",
             va="center",
-            fontsize=9.5,
+            fontsize=9.0,
             fontweight="bold",
             color=row["_text_color"],
             zorder=6,
@@ -179,7 +191,7 @@ for _, row in label_df.iterrows():
     ax.annotate(
         str(row["Team"]),
         (row[x_metric], row[y_metric]),
-        xytext=(9, 6),
+        xytext=(10, 7),
         textcoords="offset points",
         fontsize=8.5 if label_mode == "All teams" else 10.5,
         fontweight="bold" if row.get("_highlight", False) else "normal",
@@ -192,7 +204,7 @@ fig.text(0.08, 0.965, "Team Scatter Lab", ha="left", va="top", fontsize=22, font
 fig.text(
     0.08,
     0.932,
-    f"{season} | {scope_txt} | {len(plot_df)} teams | weighted by player minutes",
+    f"{season} | {scope_txt} | {len(plot_df)} teams | team-level source",
     ha="left",
     va="top",
     fontsize=10.5,
@@ -201,7 +213,7 @@ fig.text(
 fig.text(
     0.02,
     0.018,
-    "Point fill = team primary colour; point border = team secondary colour. All points use the same size and display a 3-letter team code.",
+    "Source = team_league_base.csv.gz. Point fill = team primary colour; point border = team secondary colour; each point displays a 3-letter team code.",
     ha="left",
     va="bottom",
     fontsize=7,
@@ -220,10 +232,13 @@ st.download_button(
 plt.close(fig)
 
 st.subheader("Dati plottati")
-show_cols = ["Season", "League", "Team", "Players", "Total minutes", x_metric, y_metric, "_abbr", "_fill_color", "_edge_color"]
+show_cols = [
+    "Season", "League", "Nation", "Competition", "Team", "Matches estimated", "Players in player dataset", "Player minutes total",
+    x_metric, y_metric, "_abbr", "_fill_color", "_edge_color",
+]
 show_cols = [c for c in show_cols if c in plot_df.columns]
 display_df = plot_df[show_cols].sort_values(y_metric, ascending=False).copy()
-for col in ["Total minutes", x_metric, y_metric]:
+for col in ["Matches estimated", "Players in player dataset", "Player minutes total", x_metric, y_metric]:
     if col in display_df.columns:
         display_df[col] = clean_numeric(display_df[col]).round(2)
 st.dataframe(display_df, hide_index=True, use_container_width=True)

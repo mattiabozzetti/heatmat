@@ -15,6 +15,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "processed"
 PLAYERS_FILE = DATA_DIR / "players_enriched_with_clusters.csv.gz"
 GK_FILE = DATA_DIR / "gk_enriched_with_clusters.csv.gz"
+TEAM_FILE = DATA_DIR / "team_league_base.csv.gz"
 
 BIG_FIVE_LEAGUES = {"Serie A", "Premier League", "La Liga", "Bundesliga", "Ligue 1"}
 
@@ -161,6 +162,12 @@ def load_outfield() -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def load_gk() -> pd.DataFrame:
     df = pd.read_csv(GK_FILE, compression="gzip", low_memory=False)
+    return standardize_base_columns(df)
+
+
+@st.cache_data(show_spinner=False)
+def load_team_base() -> pd.DataFrame:
+    df = pd.read_csv(TEAM_FILE, compression="gzip", low_memory=False)
     return standardize_base_columns(df)
 
 
