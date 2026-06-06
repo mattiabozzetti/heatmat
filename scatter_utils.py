@@ -15,8 +15,17 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data" / "processed"
 PLAYERS_FILE = DATA_DIR / "players_enriched_with_clusters.csv.gz"
 GK_FILE = DATA_DIR / "gk_enriched_with_clusters.csv.gz"
+TEAM_BASE_FILE = DATA_DIR / "team_league_base.csv.gz"
 
 BIG_FIVE_LEAGUES = {"Serie A", "Premier League", "La Liga", "Bundesliga", "Ligue 1"}
+BIG_FIVE_COMPETITIONS = {
+    ("Serie A", "Italy"),
+    ("Premier League", "England"),
+    ("La Liga", "Spain"),
+    ("Bundesliga", "Germany"),
+    ("Ligue 1", "France"),
+}
+LEAGUE_DISPLAY_COL = "League display"
 
 FIG_BG = "#FFFFFF"
 AXIS_COLOR = "#111111"
@@ -978,20 +987,69 @@ def load_gk() -> pd.DataFrame:
     return standardize_base_columns(df)
 
 
+@st.cache_data(show_spinner=False)
+def load_team_base() -> pd.DataFrame:
+    if not TEAM_BASE_FILE.exists():
+        raise FileNotFoundError(
+            f"Non trovo il file team-level richiesto: {TEAM_BASE_FILE}. "
+            "Aggiungi data/processed/team_league_base.csv.gz alla repo."
+        )
+    df = pd.read_csv(TEAM_BASE_FILE, compression="gzip", low_memory=False)
+    return standardize_base_columns(df)
+
+
+def build_league_display(df: pd.DataFrame) -> pd.Series:
+    """Return 'League (Nation)' when a Nation column is available."""
+    if "League" in df.columns:
+        league = df["League"].astype(str).replace({"nan": np.nan, "None": np.nan})
+    else:
+        league = pd.Series("", index=df.index, dtype="object")
+
+    if "Nation" not in df.columns:
+        return league
+
+    nation = df["Nation"].astype(str).replace({"nan": np.nan, "None": np.nan})
+    has_nation = nation.notna() & nation.ne("")
+    return league.where(~has_nation, league + " (" + nation + ")")
+
+
 def standardize_base_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    for col in ["Season", "Player", "Team", "League", "Nation", "Position", "Role bucket", "GK role", "style_cluster_short_label", "style_cluster_name"]:
+    text_cols = [
+        "Season", "Player", "Team", "League", "Nation", "Competition",
+        "Position", "Role bucket", "GK role", "style_cluster_short_label", "style_cluster_name",
+    ]
+    for col in text_cols:
         if col in df.columns:
-            df[col] = df[col].astype(str).replace("nan", np.nan)
+            df[col] = df[col].astype(str).replace({"nan": np.nan, "None": np.nan})
+    if "League" in df.columns:
+        df[LEAGUE_DISPLAY_COL] = build_league_display(df)
     if "Minutes played" in df.columns:
         df["Minutes played"] = clean_numeric(df["Minutes played"])
     return df
 
 
+def league_display_values(df: pd.DataFrame) -> list[str]:
+    work = df.copy()
+    if LEAGUE_DISPLAY_COL not in work.columns and "League" in work.columns:
+        work[LEAGUE_DISPLAY_COL] = build_league_display(work)
+    if LEAGUE_DISPLAY_COL in work.columns:
+        values = work[LEAGUE_DISPLAY_COL].dropna().astype(str).unique().tolist()
+    elif "League" in work.columns:
+        values = work["League"].dropna().astype(str).unique().tolist()
+    else:
+        values = []
+    return sorted(values)
+
+
 def numeric_metric_columns(df: pd.DataFrame, min_non_null: int = 8) -> list[str]:
     out: list[str] = []
+    excluded = set(NON_METRIC_EXACT) | {
+        "Season", "Player", "Team", "League", "Nation", "Competition", LEAGUE_DISPLAY_COL,
+        "Position", "Role bucket", "GK role", "style_cluster_short_label", "style_cluster_name",
+    }
     for col in df.columns:
-        if col in NON_METRIC_EXACT:
+        if col in excluded:
             continue
         lower = str(col).lower()
         if any(tok in lower for tok in NON_METRIC_TOKENS):
@@ -1000,12 +1058,24 @@ def numeric_metric_columns(df: pd.DataFrame, min_non_null: int = 8) -> list[str]
         if values.notna().sum() >= min_non_null and values.nunique(dropna=True) > 1:
             out.append(str(col))
     preferred_order = [
+        # Team-level tactical / outcome metrics
+        "xG/team derived", "Goals/team derived", "xGA per match weighted", "GA per match weighted",
+        "xG total derived", "Goals total derived", "Goals for total", "Goals against total",
+        "xGD total derived", "Goals - xG total derived", "Goal difference total",
+        "Lost balls in own half", "Lost balls", "Average distance to the goal at ball losses",
+        "Ball recoveries after losses within 5 seconds",
+        "Ball recoveries after losses within 5 seconds in the opponent's half of the field",
+        "Ball recoveries after losses within 10 seconds",
+        "Ball recoveries after losses within 10 seconds in the opponent's half of the field",
+        "Goal kicks short (<15 m)", "Goal kicks medium (15-40 m)", "Goal kicks long (40+ m)",
+        "Final third entries through pass", "Final third entries through carry", "Entries to the opponent's half",
+        "Entries to the opponent's box", "Progressive passes", "Progressive passes accurate, %",
+        # Player/GK defaults
         "Goals", "Assists", "Goals + Assists", "xG (expected goals)", "xA", "xG + xA",
         "Shots", "Shots on target, %", "Passes", "Passes accurate, %", "Key passes", "Key passes accurate, %",
-        "Progressive passes", "Progressive passes accurate, %", "Carry", "Dribbles", "Dribbles successful, %",
-        "Defensive challenges", "Defensive challenges won, %", "Air challenges", "Air challenges won, %",
-        "Ball recoveries", "Interceptions", "Tackles", "Tackles successful, %", "Ball possession, %",
-        "Goals prevented", "Shots saved, %", "Cross claim rate", "Passes accurate, %",
+        "Carry", "Dribbles", "Dribbles successful, %", "Defensive challenges", "Defensive challenges won, %",
+        "Air challenges", "Air challenges won, %", "Ball recoveries", "Interceptions", "Tackles", "Tackles successful, %",
+        "Ball possession, %", "Goals prevented", "Shots saved, %", "Cross claim rate",
     ]
     ranked = [c for c in preferred_order if c in out]
     ranked.extend([c for c in out if c not in ranked])
@@ -1013,11 +1083,24 @@ def numeric_metric_columns(df: pd.DataFrame, min_non_null: int = 8) -> list[str]
 
 
 def big_five_mask(df: pd.DataFrame) -> pd.Series:
-    """Big Five helper: excludes the non-English Premier League rows when Nation is available."""
-    mask = df["League"].isin(BIG_FIVE_LEAGUES)
+    """Big Five helper based on League + Nation, so Russian Premier League is excluded."""
+    if "League" not in df.columns:
+        return pd.Series(False, index=df.index)
+    league = df["League"].astype(str)
     if "Nation" in df.columns:
-        mask = mask & ((df["League"] != "Premier League") | (df["Nation"].astype(str).eq("England")))
-    return mask
+        nation = df["Nation"].astype(str)
+        mask = pd.Series(False, index=df.index)
+        for league_name, country in BIG_FIVE_COMPETITIONS:
+            mask = mask | (league.eq(league_name) & nation.eq(country))
+        return mask
+    # Fallback only for datasets without Nation; keep this for older local files.
+    return league.isin(BIG_FIVE_LEAGUES)
+
+
+def big_five_league_display_values(df: pd.DataFrame) -> list[str]:
+    if df.empty:
+        return []
+    return league_display_values(df[big_five_mask(df)].copy())
 
 
 def apply_base_filters(
@@ -1027,17 +1110,24 @@ def apply_base_filters(
     selected_leagues: list[str] | None = None,
     min_minutes: int = 0,
 ) -> pd.DataFrame:
-    out = df.copy()
+    out = standardize_base_columns(df)
     if season and "Season" in out.columns:
         out = out[out["Season"].astype(str).eq(str(season))]
     if min_minutes > 0 and "Minutes played" in out.columns:
         out = out[clean_numeric(out["Minutes played"]).fillna(0) >= min_minutes]
+
     if league_mode == "Big Five" and "League" in out.columns:
         out = out[big_five_mask(out)]
-    elif league_mode == "Custom leagues" and selected_leagues and "League" in out.columns:
-        out = out[out["League"].isin(selected_leagues)]
-    elif league_mode not in {"All leagues", "Big Five", "Custom leagues"} and "League" in out.columns:
-        out = out[out["League"].astype(str).eq(str(league_mode))]
+    elif league_mode == "Custom leagues" and selected_leagues:
+        if LEAGUE_DISPLAY_COL in out.columns:
+            out = out[out[LEAGUE_DISPLAY_COL].astype(str).isin(selected_leagues)]
+        elif "League" in out.columns:
+            out = out[out["League"].astype(str).isin(selected_leagues)]
+    elif league_mode not in {"All leagues", "Big Five", "Custom leagues"}:
+        if LEAGUE_DISPLAY_COL in out.columns:
+            out = out[out[LEAGUE_DISPLAY_COL].astype(str).eq(str(league_mode))]
+        elif "League" in out.columns:
+            out = out[out["League"].astype(str).eq(str(league_mode))]
     return out.copy()
 
 
